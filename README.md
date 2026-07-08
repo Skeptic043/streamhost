@@ -1,8 +1,8 @@
 # StreamHost
 
-Share a monitor or a single window to a few friends' browsers at better quality
-than a Discord screenshare. Windows only. Viewers just open a link in Chrome or
-Firefox. Voice stays in Discord.
+Share a monitor or a single window to a few friends at better quality than a
+Discord screenshare. Windows only. Friends watch in the app's built-in viewer or
+by opening a link in Chrome or Firefox. Voice stays in Discord.
 
 ## Build from source
 
