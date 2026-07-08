@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="favicon.ico">
+<title>Stream Grid</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #101215; color: #e6e8eb; }
+  body { font: 13px/1.4 system-ui, "Segoe UI", sans-serif; display: flex; flex-direction: column; }
+  header {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    padding: 8px 12px; background: #16181c; border-bottom: 1px solid #2e333b;
+  }
+  header .title { font-weight: 600; margin-right: 8px; }
+  header input {
+    width: 280px; padding: 6px 10px; background: #1d2026; color: #e6e8eb;
+    border: 1px solid #2e333b; border-radius: 8px; font: inherit;
+  }
+  header input:focus { outline: none; border-color: #4f9cf9; }
+  header button {
+    padding: 6px 12px; background: #2b5a94; color: #e6e8eb; border: none;
+    border-radius: 8px; font: inherit; cursor: pointer;
+  }
+  header button:hover { background: #4f9cf9; }
+  header .hint { color: #9aa1ab; font-size: 12px; }
+  #grid {
+    flex: 1; display: grid; gap: 6px; padding: 6px; min-height: 0;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 560px), 1fr));
+    grid-auto-rows: 1fr;
+  }
+  .tile {
+    display: flex; flex-direction: column; min-height: 240px;
+    background: #16181c; border: 1px solid #2e333b; border-radius: 10px; overflow: hidden;
+  }
+  .tile .bar {
+    display: flex; align-items: center; gap: 8px; padding: 4px 10px;
+    background: #1d2026; font-size: 12px; color: #9aa1ab;
+  }
+  .tile .dot { width: 8px; height: 8px; border-radius: 50%; background: #e05555; flex: none; }
+  .tile.live .dot { background: #58c472; }
+  .tile .name { font-weight: 600; color: #e6e8eb; }
+  .tile .spacer { flex: 1; }
+  .tile .bar a, .tile .bar button {
+    background: none; border: none; color: #9aa1ab; cursor: pointer;
+    font: inherit; text-decoration: none; padding: 2px 6px;
+  }
+  .tile .bar a:hover, .tile .bar button:hover { color: #e6e8eb; }
+  .tile iframe { flex: 1; width: 100%; border: none; background: #000; }
+  #empty {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    color: #9aa1ab; text-align: center; line-height: 2;
+  }
+</style>
+</head>
+<body>
+<header>
+  <span class="title">Stream Grid</span>
+  <input id="urlInput" placeholder="paste a friend's stream link (http://100.x.y.z:8093/)" spellcheck="false">
+  <button id="addBtn">Add</button>
+  <span class="hint">Streams you add are remembered in this browser.</span>
+</header>
+<div id="grid"></div>
+<div id="empty">No streams added yet.<br>Paste each friend's stream link above once — they'll stick around.</div>
+
+<script>
+"use strict";
+const grid = document.getElementById("grid");
+const empty = document.getElementById("empty");
+const urlInput = document.getElementById("urlInput");
+const KEY = "streamhost_grid_urls";
+
+function load() { try { return JSON.parse(localStorage.getItem(KEY)) || []; } catch { return []; } }
+function save(urls) { localStorage.setItem(KEY, JSON.stringify(urls)); }
+
+function normalize(u) {
+  u = u.trim();
+  if (!u) return null;
+  if (!/^https?:\/\//i.test(u)) u = "http://" + u;
+  try { const parsed = new URL(u); return parsed.origin + "/"; } catch { return null; }
+}
+
+function render() {
+  const urls = load();
+  grid.innerHTML = "";
+  empty.style.display = urls.length ? "none" : "flex";
+  grid.style.display = urls.length ? "grid" : "none";
+
+  for (const url of urls) {
+    const tile = document.createElement("div");
+    tile.className = "tile";
+    tile.dataset.url = url;
+
+    const bar = document.createElement("div");
+    bar.className = "bar";
+    bar.innerHTML = `<span class="dot"></span><span class="name">…</span><span class="state">connecting</span><span class="spacer"></span>`;
+
+    const moveL = document.createElement("button");
+    moveL.textContent = "◀";
+    moveL.title = "Move earlier (left/up)";
+    moveL.onclick = () => move(url, -1);
+    bar.appendChild(moveL);
+
+    const moveR = document.createElement("button");
+    moveR.textContent = "▶";
+    moveR.title = "Move later (right/down)";
+    moveR.onclick = () => move(url, +1);
+    bar.appendChild(moveR);
+
+    const open = document.createElement("a");
+    open.textContent = "open ↗";
+    open.href = url;
+    open.target = "_blank";
+    bar.appendChild(open);
+
+    const remove = document.createElement("button");
+    remove.textContent = "✕";
+    remove.title = "Remove";
+    remove.onclick = () => { save(load().filter(u => u !== url)); render(); };
+    bar.appendChild(remove);
+
+    const frame = document.createElement("iframe");
+    frame.src = url;
+    frame.allow = "autoplay; fullscreen";
+    frame.allowFullscreen = true;
+
+    tile.appendChild(bar);
+    tile.appendChild(frame);
+    grid.appendChild(tile);
+  }
+  poll();
+}
+
+function poll() {
+  for (const tile of grid.children) {
+    const url = tile.dataset.url;
+    fetch(url + "api/stats", { signal: AbortSignal.timeout(3000) })
+      .then(r => r.json())
+      .then(s => {
+        // "Responded" is not "live": require the host's own health state.
+        const live = s.state === "live";
+        tile.classList.toggle("live", live);
+        tile.querySelector(".name").textContent = s.name || url;
+        tile.querySelector(".state").textContent = live
+          ? `${s.sourceFps} fps · ${s.viewers} watching`
+          : (s.state || "not streaming");
+      })
+      .catch(() => {
+        tile.classList.remove("live");
+        if (tile.querySelector(".name").textContent === "…")
+          tile.querySelector(".name").textContent = url.replace(/^https?:\/\//, "");
+        tile.querySelector(".state").textContent = "offline";
+      });
+  }
+}
+setInterval(poll, 5000);
+
+function move(url, dir) {
+  const urls = load();
+  const i = urls.indexOf(url);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= urls.length) return;
+  [urls[i], urls[j]] = [urls[j], urls[i]];
+  save(urls);
+  render();
+}
+
+document.getElementById("addBtn").onclick = add;
+urlInput.addEventListener("keydown", e => { if (e.key === "Enter") add(); });
+function add() {
+  const url = normalize(urlInput.value);
+  if (!url) return;
+  const urls = load();
+  if (!urls.includes(url)) { urls.push(url); save(urls); }
+  urlInput.value = "";
+  render();
+}
+
+render();
+</script>
+</body>
+</html>

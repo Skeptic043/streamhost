@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="favicon.ico">
+<title>Stream</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #0d0f12; overflow: hidden; }
+  body { font: 13px/1.4 system-ui, "Segoe UI", sans-serif; color: #e6e8eb; }
+  #stage { position: relative; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
+  video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+  #overlay {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 10px;
+    background: rgba(13,15,18,.85); transition: opacity .3s; cursor: pointer;
+  }
+  #overlay.hidden { opacity: 0; pointer-events: none; }
+  #overlay .big { font-size: 40px; }
+  #overlay .msg { color: #9aa1ab; }
+  #badge {
+    position: absolute; top: 10px; left: 10px; padding: 4px 10px;
+    background: rgba(13,15,18,.7); border: 1px solid #2e333b; border-radius: 999px;
+    font-size: 12px; color: #9aa1ab; cursor: pointer; user-select: none;
+  }
+  #badge .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #e05555; margin-right: 6px; }
+  #badge.live .dot { background: #58c472; }
+  #stats {
+    position: absolute; top: 44px; left: 10px; padding: 10px 12px; display: none;
+    background: rgba(13,15,18,.85); border: 1px solid #2e333b; border-radius: 10px;
+    font: 12px/1.7 Consolas, monospace; color: #b9c0ca; white-space: pre; min-width: 210px;
+  }
+  #stats.show { display: block; }
+  #controls {
+    position: absolute; bottom: 12px; right: 12px; display: flex; gap: 10px;
+    align-items: center; padding: 8px 12px;
+    background: rgba(13,15,18,.8); border: 1px solid #2e333b; border-radius: 999px;
+    opacity: 0; transition: opacity .25s; user-select: none;
+  }
+  #stage:hover #controls, #controls:focus-within { opacity: 1; }
+  #controls button {
+    background: none; border: none; color: #e6e8eb; font-size: 16px;
+    cursor: pointer; padding: 0 2px; line-height: 1;
+  }
+  #controls button:hover { color: #4f9cf9; }
+  #controls input[type=range] { width: 90px; accent-color: #4f9cf9; cursor: pointer; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="video" muted playsinline></video>
+  <div id="badge"><span class="dot"></span><span id="badgeText">connecting</span></div>
+  <div id="stats"></div>
+  <div id="controls">
+    <button id="muteBtn" title="Mute / unmute">&#128263;</button>
+    <input type="range" id="volSlider" min="0" max="100" value="100" title="Volume">
+    <button id="fsBtn" title="Fullscreen">&#x26F6;</button>
+  </div>
+  <div id="overlay">
+    <div class="big">&#9654;</div>
+    <div class="msg" id="overlayMsg">connecting&hellip;</div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const video = document.getElementById("video");
+const badge = document.getElementById("badge");
+const badgeText = document.getElementById("badgeText");
+const statsEl = document.getElementById("stats");
+const overlay = document.getElementById("overlay");
+const overlayMsg = document.getElementById("overlayMsg");
+
+badge.onclick = () => statsEl.classList.toggle("show");
+// Sound stays off until deliberately enabled via the chip or the hover controls —
+// clicking the video itself never changes audio.
+overlay.onclick = () => { video.play().catch(() => {}); };
+
+const muteBtn = document.getElementById("muteBtn");
+const volSlider = document.getElementById("volSlider");
+const fsBtn = document.getElementById("fsBtn");
+muteBtn.onclick = () => { video.muted = !video.muted; syncSoundChip(); };
+volSlider.oninput = () => {
+  video.volume = volSlider.value / 100;
+  if (volSlider.value > 0 && video.muted) { video.muted = false; syncSoundChip(); }
+};
+fsBtn.onclick = () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.getElementById("stage").requestFullscreen().catch(() => {});
+};
+video.ondblclick = fsBtn.onclick;
+setInterval(() => { muteBtn.textContent = video.muted ? "🔇" : "🔊"; }, 500);
+
+const soundChip = document.createElement("div");
+soundChip.id = "soundChip";
+soundChip.style.cssText = "position:absolute;top:10px;right:10px;padding:4px 12px;" +
+  "background:rgba(13,15,18,.7);border:1px solid #2e333b;border-radius:999px;" +
+  "font-size:12px;color:#9aa1ab;cursor:pointer;user-select:none;display:none;";
+soundChip.onclick = () => { video.muted = !video.muted; syncSoundChip(); };
+document.getElementById("stage").appendChild(soundChip);
+
+function syncSoundChip() {
+  if (!hello || !hello.audio) { soundChip.style.display = "none"; return; }
+  soundChip.style.display = "block";
+  soundChip.textContent = video.muted ? "🔇 click for sound" : "🔊 sound on";
+}
+setInterval(syncSoundChip, 1000);
+
+// Smoothness-first tuning: deeper buffer absorbs delivery jitter; corrections
+// are gentle and only kick in when the lag is persistently high, so playback
+// speed never visibly wobbles. Override with ?buffer=0.25 in the URL.
+const params = new URLSearchParams(location.search);
+const TARGET_BUFFER = Math.min(Math.max(parseFloat(params.get("buffer")) || 0.5, 0.1), 2);
+const LOW_AT = Math.max(TARGET_BUFFER * 0.45, 0.1);      // rebuild buffer below this
+const HURRY_AT = Math.max(TARGET_BUFFER + 0.4, 1.0);     // anything under 1s of delay is left alone
+const JUMP_AT = HURRY_AT + 2.0;                          // hard-seek only when badly behind
+
+let ws = null, ms = null, sb = null, hello = null;
+let queue = [], queuedBytes = 0, retryMs = 500, hurrySince = null, lastDataAt = 0;
+let stat = { delay: 0, bytes: 0, bytesWindowStart: performance.now(), kbps: 0,
+             presented: 0, presentedLast: 0, displayFps: 0,
+             droppedLast: 0, totalLast: 0, dropWindow: "–",
+             sourceFps: "–", dupPct: "–" };
+
+// Host-side capture stats (source fps / dup %) — polled while the overlay is open.
+setInterval(() => {
+  if (!statsEl.classList.contains("show")) return;
+  fetch("/api/stats").then(r => r.json()).then(s => {
+    stat.sourceFps = s.sourceFps;
+    stat.dupPct = s.dupPct;
+  }).catch(() => {});
+}, 2000);
+
+if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) {
+  const countPresented = () => { stat.presented++; video.requestVideoFrameCallback(countPresented); };
+  video.requestVideoFrameCallback(countPresented);
+}
+
+// Page compositor rate (rAF ticks/sec). If this reads ~25-30 instead of your
+// monitor's refresh rate, the browser is compositing in software — a browser
+// settings problem (hardware acceleration), not a stream problem.
+const raf = { count: 0, last: 0, fps: 0 };
+(function rafLoop() { raf.count++; requestAnimationFrame(rafLoop); })();
+setInterval(() => { raf.fps = raf.count - raf.last; raf.last = raf.count; }, 1000);
+if (params.get("stats") === "1") statsEl.classList.add("show");
+
+function setStatus(live, text) {
+  badge.classList.toggle("live", live);
+  badgeText.textContent = text;
+  overlayMsg.textContent = text;
+  overlay.classList.toggle("hidden", live);
+}
+
+function connect() {
+  cleanup();
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.binaryType = "arraybuffer";
+
+  ws.onopen = () => { retryMs = 500; setStatus(false, "waiting for stream…"); };
+
+  ws.onmessage = (ev) => {
+    if (typeof ev.data === "string") {
+      hello = JSON.parse(ev.data);
+      document.title = `${hello.name} — ${hello.width}x${hello.height}@${hello.fps}`;
+      setupMediaSource();
+      return;
+    }
+    const dv = new DataView(ev.data);
+    const sentMs = dv.getFloat64(0, true);
+    stat.delay = stat.delay * 0.9 + (Date.now() - sentMs) * 0.1;
+    stat.bytes += ev.data.byteLength;
+    lastDataAt = performance.now();
+    queue.push(new Uint8Array(ev.data, 8));
+    queuedBytes += ev.data.byteLength;
+    // Bounded backlog: if appends can't keep up, reconnect for a clean resync
+    // instead of growing memory until the tab dies.
+    if (queuedBytes > 32 * 1024 * 1024) {
+      setStatus(false, "buffer overrun — reconnecting…");
+      try { ws.close(); } catch (_) {}
+      return;
+    }
+    pump();
+  };
+
+  ws.onclose = () => {
+    setStatus(false, "reconnecting…");
+    setTimeout(connect, retryMs);
+    retryMs = Math.min(retryMs * 2, 5000);
+  };
+}
+
+function setupMediaSource() {
+  ms = new MediaSource();
+  video.src = URL.createObjectURL(ms);
+  ms.addEventListener("sourceopen", () => {
+    URL.revokeObjectURL(video.src);
+    const mime = `video/mp4; codecs="${hello.codec}"`;
+    if (!MediaSource.isTypeSupported(mime)) {
+      setStatus(false, `codec unsupported: ${mime}`);
+      return;
+    }
+    sb = ms.addSourceBuffer(mime);
+    sb.mode = "segments";
+    sb.addEventListener("updateend", pump);
+    sb.addEventListener("error", () => {
+      setStatus(false, "decode error — reconnecting…");
+      try { ws && ws.close(); } catch (_) {} // actually reconnect (onclose → retry)
+    });
+    pump();
+  }, { once: true });
+}
+
+function pump() {
+  if (!sb || sb.updating || queue.length === 0) return;
+  // Coalesce everything pending into ONE appendBuffer call — Firefox's media
+  // pipeline can't keep up with 60 tiny appends/sec (presents ~25fps), while
+  // fewer, larger appends play at full rate.
+  let chunk;
+  if (queue.length === 1) {
+    chunk = queue.shift();
+  } else {
+    let total = 0;
+    for (const q of queue) total += q.length;
+    chunk = new Uint8Array(total);
+    let off = 0;
+    for (const q of queue) { chunk.set(q, off); off += q.length; }
+    queue.length = 0;
+  }
+  queuedBytes = Math.max(0, queuedBytes - chunk.length);
+  try {
+    sb.appendBuffer(chunk);
+  } catch (e) {
+    if (e.name === "QuotaExceededError" && video.buffered.length) {
+      queue.unshift(chunk); // retry after the remove() below finishes
+      try { sb.remove(0, Math.max(0, video.currentTime - 5)); } catch (_) {}
+    } else {
+      // Anything else: burn it down and reconnect cleanly.
+      try { ws && ws.close(); } catch (_) {}
+    }
+  }
+  if (video.paused) video.play().catch(() => {});
+}
+
+function cleanup() {
+  if (ws) { ws.onclose = null; try { ws.close(); } catch (_) {} }
+  ws = null; sb = null; ms = null; hello = null; queue = []; queuedBytes = 0; lastDataAt = 0;
+  video.removeAttribute("src");
+  video.load();
+}
+
+// Latency governor + housekeeping. Hysteresis: we only speed up when the lag
+// has been high for 1.5s straight, and only by 3% — invisible to the eye.
+setInterval(() => {
+  if (!video.buffered.length) return;
+  const end = video.buffered.end(video.buffered.length - 1);
+  const lag = end - video.currentTime;
+
+  if (lag > JUMP_AT) {
+    video.currentTime = end - TARGET_BUFFER;
+    video.playbackRate = 1.0;
+    hurrySince = null;
+  } else if (lag > HURRY_AT) {
+    if (hurrySince === null) hurrySince = performance.now();
+    if (performance.now() - hurrySince > 1500) video.playbackRate = 1.03;
+  } else {
+    hurrySince = null;
+    // Slightly under target: ease off to rebuild the cushion instead of freezing later.
+    video.playbackRate = (lag < LOW_AT) ? 0.97 : 1.0;
+  }
+
+  // Trim history so the buffer never bloats
+  if (sb && !sb.updating) {
+    const start = video.buffered.start(0);
+    if (video.currentTime - start > 20) {
+      try { sb.remove(start, video.currentTime - 5); } catch (_) {}
+    }
+  }
+}, 250);
+
+// Stats + status
+setInterval(() => {
+  const now = performance.now();
+  const winSec = (now - stat.bytesWindowStart) / 1000;
+  if (winSec >= 1) {
+    stat.kbps = Math.round((stat.bytes * 8) / winSec / 1000);
+    stat.bytes = 0;
+    stat.bytesWindowStart = now;
+    stat.displayFps = Math.round((stat.presented - stat.presentedLast) / winSec);
+    stat.presentedLast = stat.presented;
+  }
+  const stalled = ws && ws.readyState === 1 && lastDataAt > 0 && performance.now() - lastDataAt > 3000;
+  const live = !!(ws && ws.readyState === 1 && video.readyState >= 2 && !video.paused) && !stalled;
+  setStatus(live, stalled ? "stalled — no data from host…" : live ? "live" : badgeText.textContent);
+
+  const q = video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality() : null;
+  if (q) {
+    const dd = q.droppedVideoFrames - stat.droppedLast;
+    const dt = q.totalVideoFrames - stat.totalLast;
+    stat.dropWindow = dt > 0 ? `${dd}/${dt} (${(dd * 100 / dt).toFixed(1)}%)` : "–";
+    stat.droppedLast = q.droppedVideoFrames;
+    stat.totalLast = q.totalVideoFrames;
+  }
+  const lag = video.buffered.length
+    ? (video.buffered.end(video.buffered.length - 1) - video.currentTime) : 0;
+  statsEl.textContent =
+    `stream   ${video.videoWidth}x${video.videoHeight}@${hello ? hello.fps : "?"}\n` +
+    `source   ${stat.sourceFps} fps (dup ${stat.dupPct}%)\n` +
+    `display  ${stat.displayFps} fps shown\n` +
+    `page     ${raf.fps} fps (compositor)\n` +
+    `dropped  ${stat.dropWindow} last 1s\n` +
+    `delay    ${Math.max(0, stat.delay + lag * 1000).toFixed(0)} ms\n` +
+    `  wire   ${Math.max(0, stat.delay).toFixed(0)} ms\n` +
+    `  buffer ${(lag * 1000).toFixed(0)} ms\n` +
+    `bitrate  ${stat.kbps} kbps\n` +
+    `rate     ${video.playbackRate.toFixed(2)}x`;
+}, 1000);
+
+connect();
+</script>
+</body>
+</html>
