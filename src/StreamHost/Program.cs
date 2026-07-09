@@ -95,7 +95,7 @@ internal static class Program
         if (audioPid == 0 && !opts.NoAudio && string.IsNullOrEmpty(opts.Window))
             Console.WriteLine("[audio] no audio source (monitor share) — use --audio \"game name\" to add game audio");
 
-        var session = new StreamSession(new SessionConfig
+        var config = new SessionConfig
         {
             MonitorHandle = monitorHandle,
             WindowHandle = windowHandle,
@@ -109,14 +109,32 @@ internal static class Program
             FragMs = opts.FragMs,
             NoCursor = opts.NoCursor,
             CompatibilityCapture = opts.CompatCapture,
-        });
+        };
 
+        var session = new StreamSession(config);
         using var done = new ManualResetEventSlim(false);
-        session.Stopped += _ => done.Set();
+        string? stopReason = null;
+        session.Stopped += r => { stopReason = r; done.Set(); };
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; session.Stop(); };
         Console.WriteLine("[ready] Ctrl+C to stop");
         session.Start();
         done.Wait();
+
+        // Same one-shot safety net as the GUI: a stalled/dead GPU encoder restarts
+        // the stream on the CPU encoder instead of just exiting.
+        bool encoderFailed = stopReason == "encoder-stall" ||
+                             (stopReason?.StartsWith("encoder exited") ?? false);
+        if (encoderFailed && opts.Encoder != "libx264")
+        {
+            Console.WriteLine("[encoder] GPU encoder produced no video — restarting with the CPU encoder (libx264)…");
+            Thread.Sleep(800); // let the port release
+            done.Reset();
+            var retry = new StreamSession(config with { Encoder = "libx264" });
+            retry.Stopped += _ => done.Set();
+            Console.CancelKeyPress += (_, e) => { e.Cancel = true; retry.Stop(); };
+            retry.Start();
+            done.Wait();
+        }
         return 0;
     }
 

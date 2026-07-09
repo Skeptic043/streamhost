@@ -103,7 +103,9 @@ public sealed class WebServer : IDisposable
             if (path == "/") path = "/index.html";
             if (path == "/grid") path = "/grid.html";
             string file = Path.GetFullPath(Path.Combine(_wwwroot, path.TrimStart('/')));
-            if (!file.StartsWith(_wwwroot, StringComparison.OrdinalIgnoreCase) || !File.Exists(file))
+            // Trailing separator so a sibling like "wwwroot-x" can't pass the prefix check.
+            string root = _wwwroot.EndsWith(Path.DirectorySeparatorChar) ? _wwwroot : _wwwroot + Path.DirectorySeparatorChar;
+            if (!file.StartsWith(root, StringComparison.OrdinalIgnoreCase) || !File.Exists(file))
             {
                 await WriteResponseAsync(context, 404, "text/plain", "not found");
                 return;

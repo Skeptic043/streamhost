@@ -8,7 +8,9 @@ namespace StreamHost.Capture;
 /// <summary>
 /// Monitor capture via DXGI desktop duplication. Unlike Windows.Graphics.Capture,
 /// this path sees exclusive-fullscreen content (games that freeze under WGC when
-/// focused). Trade-off: the mouse cursor is not composited into the frames.
+/// focused). Duplication frames never include the pointer (the OS draws it as a
+/// hardware overlay), so the shape/position surfaced by AcquireNextFrame is
+/// composited into the CPU frame on readback.
 /// Monitors only; rotated displays are not supported by this backend.
 /// </summary>
 public sealed class DuplicationCapture : ICaptureSource
@@ -30,6 +32,15 @@ public sealed class DuplicationCapture : ICaptureSource
     private long _framesArrived;
     private volatile Exception? _captureError;
 
+    // Pointer state from AcquireNextFrame, drawn into the frame on readback.
+    private readonly Lock _cursorGate = new();
+    private byte[]? _pointerShape;
+    private OutduplPointerShapeInfo _pointerShapeInfo;
+    private int _pointerX, _pointerY;
+    private bool _pointerVisible;
+    private volatile bool _cursorEnabled = true;
+    private bool _loggedCursorShape;
+
     public int Width { get; }
     public int Height { get; }
     public uint GpuVendorId { get; }
@@ -37,7 +48,7 @@ public sealed class DuplicationCapture : ICaptureSource
     public long FrameVersion => Interlocked.Read(ref _framesArrived);
     public long FramesArrived => Interlocked.Read(ref _framesArrived);
     public Exception? CaptureError => _captureError;
-    public bool CursorEnabled { set { /* duplication does not composite the cursor */ } }
+    public bool CursorEnabled { set { _cursorEnabled = value; } }
 
     public DuplicationCapture(IntPtr hMonitor)
     {
@@ -74,6 +85,14 @@ public sealed class DuplicationCapture : ICaptureSource
             _device = device!;
             _context = context!;
 
+            // Duplication calls (AcquireNextFrame/GetFramePointerShape, capture
+            // thread) use the immediate context internally WITHOUT locking, while
+            // TryReadFrame maps staging textures on the pacing thread. Without
+            // runtime-level protection that race corrupts the device (observed:
+            // DEVICE_REMOVED at Map, AccessViolation reading a mapped frame).
+            using (var mt = _context.QueryInterfaceOrNull<ID3D11Multithread>())
+                mt?.SetMultithreadProtected(true);
+
             _output = foundOutput.QueryInterface<IDXGIOutput1>();
             try
             {
@@ -97,7 +116,7 @@ public sealed class DuplicationCapture : ICaptureSource
             foundAdapter.Dispose();
         }
 
-        Console.WriteLine($"[capture] compatibility capture (desktop duplication) on {AdapterName}, {Width}x{Height} — cursor is not captured in this mode");
+        Console.WriteLine($"[capture] desktop duplication on {AdapterName}, {Width}x{Height}");
 
         var desc = new Texture2DDescription
         {
@@ -128,8 +147,13 @@ public sealed class DuplicationCapture : ICaptureSource
         {
             try
             {
-                var result = _duplication.AcquireNextFrame(500, out _, out IDXGIResource? resource);
-                if (result == Vortice.DXGI.ResultCode.WaitTimeout) continue; // no screen changes
+                // Timeout 0, not a blocking wait: with multithread protection on,
+                // AcquireNextFrame holds the device lock for its whole duration —
+                // a blocking wait here would stall the pacing thread's Map calls
+                // and collapse the output rate. Poll instead; ~2 ms granularity
+                // (timeBeginPeriod(1)) is far below a frame interval.
+                var result = _duplication.AcquireNextFrame(0, out OutduplFrameInfo frameInfo, out IDXGIResource? resource);
+                if (result == Vortice.DXGI.ResultCode.WaitTimeout) { Thread.Sleep(2); continue; } // no screen changes yet
                 if (result == Vortice.DXGI.ResultCode.AccessLost)
                 {
                     // Mode change / fullscreen transition / secure desktop: re-duplicate.
@@ -147,6 +171,10 @@ public sealed class DuplicationCapture : ICaptureSource
                             new Vortice.Mathematics.Box(0, 0, 0, Width, Height, 1));
                     }
                 }
+                // Pointer metadata must be read between Acquire and Release.
+                // Mouse-only updates also arrive as frames, which is what makes
+                // the composited cursor move smoothly on an otherwise static screen.
+                if (frameInfo.LastMouseUpdateTime != 0) UpdatePointer(frameInfo);
                 _duplication.ReleaseFrame();
                 _hasFrame = true;
                 Interlocked.Increment(ref _framesArrived);
@@ -176,6 +204,105 @@ public sealed class DuplicationCapture : ICaptureSource
         _duplication = _output.DuplicateOutput(_device);
     }
 
+    private unsafe void UpdatePointer(in OutduplFrameInfo frameInfo)
+    {
+        lock (_cursorGate)
+        {
+            _pointerVisible = frameInfo.PointerPosition.Visible;
+            if (frameInfo.PointerPosition.Visible)
+            {
+                _pointerX = frameInfo.PointerPosition.Position.X;
+                _pointerY = frameInfo.PointerPosition.Position.Y;
+            }
+            if (frameInfo.PointerShapeBufferSize > 0)
+            {
+                if (_pointerShape is null || _pointerShape.Length < frameInfo.PointerShapeBufferSize)
+                    _pointerShape = new byte[frameInfo.PointerShapeBufferSize];
+                fixed (byte* p = _pointerShape)
+                {
+                    _duplication.GetFramePointerShape(frameInfo.PointerShapeBufferSize,
+                        (IntPtr)p, out _, out _pointerShapeInfo);
+                }
+                if (!_loggedCursorShape)
+                {
+                    _loggedCursorShape = true;
+                    Console.WriteLine($"[capture] cursor shape acquired ({_pointerShapeInfo.Width}x{_pointerShapeInfo.Height}, type {_pointerShapeInfo.Type}) — compositing into frames");
+                }
+            }
+        }
+    }
+
+    /// <summary>Draws the pointer into a tightly packed BGRA frame. The three DXGI
+    /// shape formats: COLOR = BGRA with straight alpha; MASKED_COLOR = BGRA where
+    /// alpha 0 means replace and 0xFF means XOR with the screen; MONOCHROME = a
+    /// 1-bpp AND mask stacked above a 1-bpp XOR mask (Height covers both halves).</summary>
+    private void ComposeCursor(byte[] frame)
+    {
+        lock (_cursorGate)
+        {
+            if (!_pointerVisible || _pointerShape is null) return;
+            byte[] shape = _pointerShape;
+            uint type = (uint)_pointerShapeInfo.Type;
+            int w = (int)_pointerShapeInfo.Width;
+            int h = type == 1 ? (int)_pointerShapeInfo.Height / 2 : (int)_pointerShapeInfo.Height;
+            int pitch = (int)_pointerShapeInfo.Pitch;
+            int px = _pointerX, py = _pointerY;
+
+            for (int y = 0; y < h; y++)
+            {
+                int fy = py + y;
+                if (fy < 0 || fy >= Height) continue;
+                for (int x = 0; x < w; x++)
+                {
+                    int fx = px + x;
+                    if (fx < 0 || fx >= Width) continue;
+                    int fi = (fy * Width + fx) * 4;
+                    switch (type)
+                    {
+                        case 2: // COLOR: straight alpha blend
+                        {
+                            int si = y * pitch + x * 4;
+                            int a = shape[si + 3];
+                            if (a == 0) break;
+                            frame[fi] = (byte)((shape[si] * a + frame[fi] * (255 - a)) / 255);
+                            frame[fi + 1] = (byte)((shape[si + 1] * a + frame[fi + 1] * (255 - a)) / 255);
+                            frame[fi + 2] = (byte)((shape[si + 2] * a + frame[fi + 2] * (255 - a)) / 255);
+                            break;
+                        }
+                        case 4: // MASKED_COLOR: alpha 0 = replace, 0xFF = XOR
+                        {
+                            int si = y * pitch + x * 4;
+                            if (shape[si + 3] == 0)
+                            {
+                                frame[fi] = shape[si];
+                                frame[fi + 1] = shape[si + 1];
+                                frame[fi + 2] = shape[si + 2];
+                            }
+                            else
+                            {
+                                frame[fi] ^= shape[si];
+                                frame[fi + 1] ^= shape[si + 1];
+                                frame[fi + 2] ^= shape[si + 2];
+                            }
+                            break;
+                        }
+                        default: // 1, MONOCHROME: screen = (screen AND and-mask) XOR xor-mask
+                        {
+                            int si = y * pitch + (x >> 3);
+                            int bit = 0x80 >> (x & 7);
+                            byte and = (byte)((shape[si] & bit) != 0 ? 0xFF : 0x00);
+                            byte xor = (byte)((shape[si + h * pitch] & bit) != 0 ? 0xFF : 0x00);
+                            frame[fi] = (byte)((frame[fi] & and) ^ xor);
+                            frame[fi + 1] = (byte)((frame[fi + 1] & and) ^ xor);
+                            frame[fi + 2] = (byte)((frame[fi + 2] & and) ^ xor);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     public bool WaitForFreshFrame(long sinceVersion, int timeoutMs)
     {
         if (FrameVersion > sinceVersion) return true;
@@ -190,41 +317,57 @@ public sealed class DuplicationCapture : ICaptureSource
         if (buffer.Length < rowBytes * Height)
             throw new ArgumentException("Frame buffer too small", nameof(buffer));
 
-        ID3D11Texture2D readFrom;
-        MappedSubresource mapped;
-        lock (_gate)
-        {
-            var writeTo = _flip ? _stagingA : _stagingB;
-            readFrom = _flip ? _stagingB : _stagingA;
-            _flip = !_flip;
-            _context.CopyResource(writeTo, _latest);
-            if (!_primed) { _primed = true; readFrom = writeTo; }
-            mapped = _context.Map(readFrom, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
-        }
-
         try
         {
-            fixed (byte* dst = buffer)
-            {
-                byte* src = (byte*)mapped.DataPointer;
-                if (mapped.RowPitch == rowBytes)
-                {
-                    Buffer.MemoryCopy(src, dst, buffer.Length, (long)rowBytes * Height);
-                }
-                else
-                {
-                    for (int y = 0; y < Height; y++)
-                        Buffer.MemoryCopy(src + (long)y * mapped.RowPitch, dst + (long)y * rowBytes, rowBytes, rowBytes);
-                }
-            }
-        }
-        finally
-        {
+            ID3D11Texture2D readFrom;
+            MappedSubresource mapped;
             lock (_gate)
             {
-                _context.Unmap(readFrom, 0);
+                var writeTo = _flip ? _stagingA : _stagingB;
+                readFrom = _flip ? _stagingB : _stagingA;
+                _flip = !_flip;
+                _context.CopyResource(writeTo, _latest);
+                if (!_primed) { _primed = true; readFrom = writeTo; }
+                mapped = _context.Map(readFrom, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
+            }
+
+            try
+            {
+                fixed (byte* dst = buffer)
+                {
+                    byte* src = (byte*)mapped.DataPointer;
+                    if (mapped.RowPitch == rowBytes)
+                    {
+                        Buffer.MemoryCopy(src, dst, buffer.Length, (long)rowBytes * Height);
+                    }
+                    else
+                    {
+                        for (int y = 0; y < Height; y++)
+                            Buffer.MemoryCopy(src + (long)y * mapped.RowPitch, dst + (long)y * rowBytes, rowBytes, rowBytes);
+                    }
+                }
+            }
+            finally
+            {
+                lock (_gate)
+                {
+                    _context.Unmap(readFrom, 0);
+                }
             }
         }
+        catch (Exception ex)
+        {
+            // Map surfaces DEVICE_REMOVED here when the GPU device is lost (driver
+            // reset/TDR). Record it instead of throwing so AutoMonitorCapture can
+            // swap backends rather than the session dying on a stack trace.
+            if (_captureError is null)
+            {
+                _captureError = ex;
+                Console.Error.WriteLine($"[capture] frame readback failed (HRESULT 0x{ex.HResult:X8}, device status 0x{(uint)_device.DeviceRemovedReason.Code:X8}): {ex.Message}");
+            }
+            return false;
+        }
+        if (_cursorEnabled) ComposeCursor(buffer);
         return true;
     }
 

@@ -97,9 +97,10 @@ public sealed class StreamSession
     private string RunCore()
     {
         var ct = _cts.Token;
-        // Monitor shares are self-managing (standard capture with automatic
-        // duplication fallback for exclusive-fullscreen apps and dead backends).
-        // --compat-capture forces duplication-only, kept for diagnostics.
+        // Monitor shares are self-managing (desktop duplication by default,
+        // standard capture as fallback and for window shares — see
+        // AutoMonitorCapture). --compat-capture forces duplication-only,
+        // kept for diagnostics.
         using ICaptureSource capture = _config.WindowHandle != IntPtr.Zero
             ? ScreenCapture.ForWindow(_config.WindowHandle)
             : _config.CompatibilityCapture
@@ -211,15 +212,29 @@ public sealed class StreamSession
         // Independent encoder-output watchdog. A stalled GPU encoder makes ffmpeg
         // stop reading stdin, which blocks the pacing loop itself — so the stall
         // check must run on its own thread and cancel the session from outside.
-        long fragsBaseline = Interlocked.Read(ref broadcaster.FragmentsSent);
+        // Runs for the WHOLE session: some encoders die mid-stream, not just at
+        // startup. Frames are fed at a fixed rate regardless of screen activity
+        // (static content repeats the last frame), so a healthy encoder always
+        // produces fragments — a zero-fragment window can only mean a stall.
         var watchdog = new Thread(() =>
         {
-            if (ct.WaitHandle.WaitOne(5000)) return; // stopped normally within 5s
-            if (Interlocked.Read(ref broadcaster.FragmentsSent) - fragsBaseline < 5)
+            long baseline = Interlocked.Read(ref broadcaster.FragmentsSent);
+            bool firstWindow = true;
+            while (!ct.WaitHandle.WaitOne(firstWindow ? 5000 : 10000))
             {
-                _encoderStalled = true;
-                Console.Error.WriteLine($"[encoder] {ffmpeg.EncoderName} wrote the header but produced no video in 5s — the GPU encoder is stalling.");
-                _cts.Cancel();
+                long total = Interlocked.Read(ref broadcaster.FragmentsSent);
+                long produced = total - baseline;
+                baseline = total;
+                if (firstWindow ? produced < 5 : produced == 0)
+                {
+                    _encoderStalled = true;
+                    Console.Error.WriteLine(firstWindow
+                        ? $"[encoder] {ffmpeg.EncoderName} wrote the header but produced no video in 5s — the GPU encoder is stalling."
+                        : $"[encoder] {ffmpeg.EncoderName} stopped producing video mid-stream — the encoder has stalled.");
+                    _cts.Cancel();
+                    return;
+                }
+                firstWindow = false;
             }
         })
         { IsBackground = true, Name = "encoder-watchdog" };

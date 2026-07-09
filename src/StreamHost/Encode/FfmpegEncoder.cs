@@ -30,13 +30,7 @@ public sealed class FfmpegEncoder : IDisposable
         long fragUs = fragMs > 0 ? fragMs * 1000L    // batched fragments (fewer, larger MSE appends)
                                  : 1_000_000L / fps; // default: one fragment per frame
 
-        string encoderOpts = encoder switch
-        {
-            "h264_nvenc" => "-preset p4 -tune ull -rc cbr -multipass 0 -profile:v high",
-            "h264_amf"   => "-usage lowlatency -quality speed -rc cbr -profile:v high",
-            "h264_qsv"   => "-preset veryfast -profile:v high",
-            _            => "-preset veryfast -tune zerolatency -profile:v high",
-        };
+        string encoderOpts = EncoderOpts(encoder);
 
         string scale = (outWidth != inWidth || outHeight != inHeight)
             ? $"-vf scale={outWidth}:{outHeight}:flags=bilinear "
@@ -85,6 +79,22 @@ public sealed class FfmpegEncoder : IDisposable
         _stdin = _process.StandardInput.BaseStream;
     }
 
+    /// <summary>Per-encoder options, shared by the real encode AND the startup probe
+    /// so a probe pass is meaningful for the config that actually runs (the v0.9-v0.10
+    /// AMD miss: the probe passed on default options while the live encode stalled on
+    /// its low-latency ones). AMF deliberately has NO -usage lowlatency: that
+    /// submission path wedges on some driver/hardware combos (RX 9070 XT field case —
+    /// header written, then zero output) while the default transcoding usage is the
+    /// path every driver release actually gets tested on. With -bf 0 and a 0.5 s GOP
+    /// the latency difference is tens of milliseconds; robustness wins.</summary>
+    public static string EncoderOpts(string encoder) => encoder switch
+    {
+        "h264_nvenc" => "-preset p4 -tune ull -rc cbr -multipass 0 -profile:v high",
+        "h264_amf"   => "-quality speed -rc cbr -profile:v high",
+        "h264_qsv"   => "-preset veryfast -profile:v high",
+        _            => "-preset veryfast -tune zerolatency -profile:v high",
+    };
+
     public bool HasExited => _process.HasExited;
     public int ExitCode { get { try { return _process.HasExited ? _process.ExitCode : 0; } catch { return -1; } } }
 
@@ -119,7 +129,9 @@ public sealed class FfmpegEncoder : IDisposable
         // Cache token version: bump when the probe changes so stale "passed"
         // verdicts (e.g. an AMD card that cleared the old trivial 320x240 test
         // but stalls on real content) get re-evaluated.
-        string token = $"v2:{gpuVendorId:X}:{preferred}";
+        // v3: probe now uses the real encoder options (EncoderOpts) and AMF
+        // dropped -usage lowlatency — every machine re-probes the new config.
+        string token = $"v3:{gpuVendorId:X}:{preferred}";
         try
         {
             if (File.Exists(cachePath) && File.ReadAllText(cachePath).Trim() == token)
@@ -142,17 +154,20 @@ public sealed class FfmpegEncoder : IDisposable
         return preferred;
     }
 
-    /// <summary>Encodes a second of realistic 1080p60 motion. A hardware encoder that
-    /// can't sustain real content (some AMD AMF driver combos write the header then
-    /// stall) fails or hangs here, so we catch it before it dead-ends a live stream
-    /// — not the old trivial 320x240 black clip that everything passed.</summary>
+    /// <summary>Encodes a second of realistic 1080p60 motion with the SAME encoder
+    /// options as a live stream. A hardware encoder that can't sustain this config
+    /// (some AMD AMF driver combos write the header then stall) fails or hangs here,
+    /// so we catch it before it dead-ends a live stream. Probing a different config
+    /// than we run proved worthless in the field — the v0.9 probe passed on defaults
+    /// while the real low-latency options stalled.</summary>
     private static bool ProbeEncoder(string encoder)
     {
         try
         {
             var psi = new ProcessStartInfo(FfmpegPath,
                 $"-hide_banner -loglevel error -f lavfi -i testsrc=size=1920x1080:rate=60 -t 1 " +
-                $"-c:v {encoder} -b:v 8000k -pix_fmt yuv420p -f null -")
+                $"-c:v {encoder} {EncoderOpts(encoder)} -b:v 8000k -maxrate 10000k -bufsize 4000k " +
+                $"-g 30 -bf 0 -pix_fmt yuv420p -f null -")
             {
                 UseShellExecute = false,
                 RedirectStandardOutput = true,

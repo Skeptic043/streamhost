@@ -32,6 +32,8 @@ public sealed class MainForm : Form
 
     private static readonly Preset[] Presets =
     [
+        new("720p · 30 fps  (~4 Mbps)", 720, 30, 4000),
+        new("720p · 60 fps  (~6 Mbps)", 720, 60, 6000),
         new("1080p · 30 fps  (~8 Mbps)", 1080, 30, 8000),
         new("1080p · 60 fps  (~12 Mbps)", 1080, 60, 12000),
         new("1440p · 30 fps  (~12 Mbps)", 1440, 30, 12000),
@@ -39,12 +41,18 @@ public sealed class MainForm : Form
         new("Native · 60 fps (~12 Mbps)", 0, 60, 12000),
     ];
 
+    private static readonly int DefaultPresetIndex =
+        Array.FindIndex(Presets, p => p.Height == 1080 && p.Fps == 60);
+
     private sealed class AppSettings
     {
         public string SourceKind { get; set; } = "window";
         public string WindowProcess { get; set; } = "";
         public int MonitorIndex { get; set; }
-        public int PresetIndex { get; set; } = 1;
+        // Presets are stored by height+fps, not array index — adding a preset
+        // used to silently shift everyone's saved choice.
+        public int PresetHeight { get; set; } = 1080;
+        public int PresetFps { get; set; } = 60;
         public string AudioSource { get; set; } = "window"; // "none" | "window" | process name
         public int Port { get; set; } = 8093;
     }
@@ -149,7 +157,7 @@ public sealed class MainForm : Form
         Controls.Add(sourceGroup);
 
         _presetCombo.Items.AddRange(Presets);
-        _presetCombo.SelectedIndex = 1;
+        _presetCombo.SelectedIndex = DefaultPresetIndex;
 
         ApplyDarkTheme(this);
         _startButton.BackColor = AccentDark;
@@ -552,7 +560,8 @@ public sealed class MainForm : Form
                 int idx = _windows.FindIndex(w => w.ProcessName.Equals(s.WindowProcess, StringComparison.OrdinalIgnoreCase));
                 if (idx >= 0) _windowCombo.SelectedIndex = idx;
             }
-            if (s.PresetIndex >= 0 && s.PresetIndex < Presets.Length) _presetCombo.SelectedIndex = s.PresetIndex;
+            int presetIdx = Array.FindIndex(Presets, p => p.Height == s.PresetHeight && p.Fps == s.PresetFps);
+            _presetCombo.SelectedIndex = presetIdx >= 0 ? presetIdx : DefaultPresetIndex;
             SelectAudioByKey(s.AudioSource);
             if (s.Port is >= 1024 and <= 65535) _portInput.Value = s.Port;
         }
@@ -569,7 +578,8 @@ public sealed class MainForm : Form
                 WindowProcess = _windowCombo.SelectedIndex >= 0 && _windowCombo.SelectedIndex < _windows.Count
                     ? _windows[_windowCombo.SelectedIndex].ProcessName : "",
                 MonitorIndex = Math.Max(_monitorCombo.SelectedIndex, 0),
-                PresetIndex = Math.Max(_presetCombo.SelectedIndex, 0),
+                PresetHeight = (_presetCombo.SelectedItem as Preset ?? Presets[DefaultPresetIndex]).Height,
+                PresetFps = (_presetCombo.SelectedItem as Preset ?? Presets[DefaultPresetIndex]).Fps,
                 AudioSource = SelectedAudioKey(),
                 Port = (int)_portInput.Value,
             };

@@ -72,6 +72,12 @@ public sealed class ScreenCapture : ICaptureSource
         _device = device!;
         _context = context!;
 
+        // The free-threaded WGC frame pool uses this device from its own threads;
+        // multithread protection makes the runtime serialize every context call
+        // (our _gate only covers OUR calls, not WGC's internal ones).
+        using (var mt = _context.QueryInterfaceOrNull<ID3D11Multithread>())
+            mt?.SetMultithreadProtected(true);
+
         using (var dxgiDevice = _device.QueryInterface<IDXGIDevice>())
         using (var adapter = dxgiDevice.GetAdapter())
         {
@@ -172,44 +178,59 @@ public sealed class ScreenCapture : ICaptureSource
         if (buffer.Length < rowBytes * Height)
             throw new ArgumentException("Frame buffer too small", nameof(buffer));
 
-        ID3D11Texture2D readFrom;
-        MappedSubresource mapped;
-        lock (_gate)
-        {
-            var writeTo = _flip ? _stagingA : _stagingB;
-            readFrom = _flip ? _stagingB : _stagingA;
-            _flip = !_flip;
-            _context.CopyResource(writeTo, _latest);
-            if (!_primed) { _primed = true; readFrom = writeTo; } // first call: no previous copy yet
-            mapped = _context.Map(readFrom, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
-        }
-
-        // The 14 MB row copy happens WITHOUT the lock — reading a mapped pointer is
-        // not a context call, and FrameArrived never touches the mapped resource.
         try
         {
-            fixed (byte* dst = buffer)
-            {
-                byte* src = (byte*)mapped.DataPointer;
-                if (mapped.RowPitch == rowBytes)
-                {
-                    Buffer.MemoryCopy(src, dst, buffer.Length, (long)rowBytes * Height);
-                }
-                else
-                {
-                    for (int y = 0; y < Height; y++)
-                        Buffer.MemoryCopy(src + (long)y * mapped.RowPitch, dst + (long)y * rowBytes, rowBytes, rowBytes);
-                }
-            }
-        }
-        finally
-        {
+            ID3D11Texture2D readFrom;
+            MappedSubresource mapped;
             lock (_gate)
             {
-                _context.Unmap(readFrom, 0);
+                var writeTo = _flip ? _stagingA : _stagingB;
+                readFrom = _flip ? _stagingB : _stagingA;
+                _flip = !_flip;
+                _context.CopyResource(writeTo, _latest);
+                if (!_primed) { _primed = true; readFrom = writeTo; } // first call: no previous copy yet
+                mapped = _context.Map(readFrom, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
             }
+
+            // The 14 MB row copy happens WITHOUT the lock — reading a mapped pointer is
+            // not a context call, and FrameArrived never touches the mapped resource.
+            try
+            {
+                fixed (byte* dst = buffer)
+                {
+                    byte* src = (byte*)mapped.DataPointer;
+                    if (mapped.RowPitch == rowBytes)
+                    {
+                        Buffer.MemoryCopy(src, dst, buffer.Length, (long)rowBytes * Height);
+                    }
+                    else
+                    {
+                        for (int y = 0; y < Height; y++)
+                            Buffer.MemoryCopy(src + (long)y * mapped.RowPitch, dst + (long)y * rowBytes, rowBytes, rowBytes);
+                    }
+                }
+            }
+            finally
+            {
+                lock (_gate)
+                {
+                    _context.Unmap(readFrom, 0);
+                }
+            }
+            return true;
         }
-        return true;
+        catch (Exception ex)
+        {
+            // A lost GPU device (driver reset/TDR) surfaces here as a failed Map.
+            // Record it instead of throwing: monitor shares get a backend swap via
+            // AutoMonitorCapture, window shares stop with a clean message.
+            if (_captureError is null)
+            {
+                _captureError = ex;
+                Console.Error.WriteLine($"[capture] frame readback failed (HRESULT 0x{ex.HResult:X8}): {ex.Message}");
+            }
+            return false;
+        }
     }
 
     public void Dispose()

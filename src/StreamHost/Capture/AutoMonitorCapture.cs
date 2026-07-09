@@ -3,11 +3,14 @@ using System.Diagnostics;
 namespace StreamHost.Capture;
 
 /// <summary>
-/// Self-managing monitor capture: starts with Windows.Graphics.Capture (cursor,
-/// well-behaved), and hot-swaps to DXGI desktop duplication when WGC starves
-/// while a fullscreen app is focused on the captured monitor (exclusive
-/// fullscreen bypasses WGC) — or when WGC can't start at all. The stream never
-/// notices: dimensions are identical and the frame counter stays monotonic.
+/// Self-managing monitor capture. DEFAULT backend is DXGI desktop duplication
+/// (full-rate delivery — 141 fps measured where WGC capped at ~50 — sees
+/// exclusive fullscreen, and composites the cursor itself since v0.12).
+/// Windows.Graphics.Capture is the fallback when duplication can't start
+/// (rotated display, another capture app holding the output) or dies. If WGC
+/// is active and starves while a fullscreen app is focused, we hot-swap back
+/// to duplication. The stream never notices a swap: dimensions are identical
+/// and the frame counter stays monotonic.
 /// </summary>
 public sealed class AutoMonitorCapture : ICaptureSource
 {
@@ -38,14 +41,15 @@ public sealed class AutoMonitorCapture : ICaptureSource
         _hMonitor = hMonitor;
         try
         {
-            _active = ScreenCapture.ForMonitor(hMonitor);
+            _active = new DuplicationCapture(hMonitor);
+            _usingDuplication = true;
         }
         catch (Exception ex)
         {
-            // Standard capture can't even start on this machine — go straight to duplication.
-            Console.WriteLine($"[capture] standard capture unavailable ({ex.Message}) — using desktop duplication");
-            _active = new DuplicationCapture(hMonitor);
-            _usingDuplication = true;
+            // Duplication can't start here (rotated display, another capture app,
+            // transition in progress) — fall back to standard capture.
+            Console.WriteLine($"[capture] desktop duplication unavailable ({ex.Message}) — using standard capture");
+            _active = ScreenCapture.ForMonitor(hMonitor);
         }
         Width = _active.Width;
         Height = _active.Height;

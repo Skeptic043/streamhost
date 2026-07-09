@@ -8,3 +8,10 @@ dist/
 .vs/
 *.user
 *.suo
+
+# Local-only dev docs and Claude config (never pushed)
+CLAUDE.md
+PLAN.md
+DESIGN.md
+field-test.md
+.claude/
