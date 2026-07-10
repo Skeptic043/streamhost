@@ -75,6 +75,11 @@ First-time setup, once per person:
 4. Start a stream and use Copy link. StreamHost prefers the Tailscale
    address automatically, so the link works from anywhere.
 
+Already using Tailscale for something else? A device is only active on one
+network at a time, but the app supports multiple accounts: click the
+Tailscale tray icon, click your account name, then "Add account" and sign
+in with the invited account. Switching networks is two clicks after that.
+
 Tailscale specifics beyond that (sharing single devices between tailnets,
 ACLs, and so on) are documented by Tailscale and out of scope here.
 
@@ -125,8 +130,12 @@ pick in the Audio dropdown. Discord, or any other app you didn't pick, is
 excluded by construction.
 
 **How many people can watch?** Your upload bandwidth divided by the
-bitrate. A 12 Mbps 1080p60 stream to four viewers needs roughly 48 Mbps of
-upload, since each viewer gets their own copy.
+bitrate, since each viewer gets their own full copy. A 12 Mbps 1080p60
+stream to four viewers needs roughly 48 Mbps of upload. Check your upload
+speed specifically, it is usually a small fraction of your download. On a
+typical cable connection the realistic ceiling is around 3 to 5 viewers;
+symmetric fiber can feed 10 or more, and lower bitrates stretch further.
+StreamHost is built for a handful of friends, not an audience.
 
 **What's the latency?** Roughly half a second to a second, tuned for
 smoothness over speed.
