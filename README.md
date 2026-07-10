@@ -62,26 +62,54 @@ relay server. Instead it runs over [Tailscale](https://tailscale.com), a
 free mesh VPN that makes your PCs reach each other directly, encrypted,
 with no port forwarding.
 
-First-time setup, once per person:
+One-time setup on the hosting PC:
 
 1. Go to tailscale.com, create a free account (it signs in with Google,
    Microsoft, GitHub, or Apple).
 2. Install Tailscale on the hosting PC and sign in. The PC gets a stable
    address that starts with 100.x.
-3. Get the viewers onto the same tailnet. The simplest way for a small
-   group is inviting them from the Tailscale admin console; the free plan
-   covers a small number of users. Viewers install Tailscale, accept the
-   invite, and sign in.
-4. Start a stream and use Copy link. StreamHost prefers the Tailscale
+3. Start a stream and use Copy link. StreamHost prefers the Tailscale
    address automatically, so the link works from anywhere.
 
-Already using Tailscale for something else? A device is only active on one
-network at a time, but the app supports multiple accounts: click the
-Tailscale tray icon, click your account name, then "Add account" and sign
-in with the invited account. Switching networks is two clicks after that.
+Then connect your viewers. There are two ways, and which one fits depends
+on the person.
 
-Tailscale specifics beyond that (sharing single devices between tailnets,
-ACLs, and so on) are documented by Tailscale and out of scope here.
+### Viewers who just watch: share your PC with them
+
+This is the way to go for most viewers. They keep their own Tailscale
+account and network, nothing about their setup changes, and they do not
+count against your account's user limit.
+
+1. The viewer creates their own free Tailscale account and installs
+   Tailscale on their machine.
+2. On your side, open the Tailscale admin console (login.tailscale.com),
+   find the hosting PC under Machines, pick Share from its menu, and send
+   the share invite it gives you to the viewer privately.
+3. The viewer accepts the invite. Your PC now shows up in their Tailscale
+   as a shared machine.
+4. Send them the stream link.
+
+Sharing is one-way: they can reach your PC, your PC cannot reach their
+devices. To stop sharing later, remove them from the same menu.
+
+### People who also stream: invite them to your network
+
+If someone hosts streams too, invite them into your Tailscale network
+instead (admin console, Users, Invite). The free plan covers a small
+number of users. They install Tailscale, accept the invite, and sign in.
+Everyone on the same network can find each other's streams with Find
+streams in the Watch window, and picks up rotated viewer keys
+automatically.
+
+If an invited person already uses Tailscale for something else: a device
+is only active on one network at a time, but the app supports multiple
+accounts. Click the Tailscale tray icon, click the account name, then
+"Add account" and sign in with the invited account. Switching networks is
+two clicks after that. Viewers you shared your PC with skip this
+entirely, which is one reason sharing is the default recommendation.
+
+Tailscale specifics beyond that (ACLs and so on) are documented by
+Tailscale and out of scope here.
 
 ## Common issues
 
