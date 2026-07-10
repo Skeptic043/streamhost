@@ -319,7 +319,7 @@ public sealed class StreamSession
         int graceMs = Math.Max(1000 / fps * 2 / 5, 2);
         long next = Stopwatch.GetTimestamp() + ticksPerFrame;
         long lastVersion = 0;
-        long freshCount = 0, dupCount = 0, lateTicks = 0, lastCompositorFrames = 0;
+        long freshCount = 0, dupCount = 0, pacingSlips = 0, lastCompositorFrames = 0;
         long lastReport = Stopwatch.GetTimestamp();
         long reportInterval = Stopwatch.Frequency * 2;
 
@@ -368,7 +368,7 @@ public sealed class StreamSession
 
             next += ticksPerFrame;
             long now = Stopwatch.GetTimestamp();
-            if (now > next + 5 * ticksPerFrame) { next = now + ticksPerFrame; lateTicks++; }
+            if (now > next + 5 * ticksPerFrame) { next = now + ticksPerFrame; pacingSlips++; }
 
             if (now - lastReport > reportInterval)
             {
@@ -379,7 +379,9 @@ public sealed class StreamSession
                 broadcaster.SourceFps = (int)Math.Round((capture.FramesArrived - lastCompositorFrames) / windowSec);
                 broadcaster.DupPercent = (int)Math.Round(dupPct);
                 lastCompositorFrames = capture.FramesArrived;
-                Console.WriteLine($"[stats] fresh {freshCount} dup {dupCount} ({dupPct:F1}%), late resyncs {lateTicks}, source {broadcaster.SourceFps} fps, viewers {broadcaster.ViewerCount}");
+                // "pacing slips", not "resyncs": the viewer fell-behind message in
+                // Broadcaster also says resync, and the two kept getting conflated.
+                Console.WriteLine($"[stats] fresh {freshCount} dup {dupCount} ({dupPct:F1}%), pacing slips {pacingSlips}, source {broadcaster.SourceFps} fps, viewers {broadcaster.ViewerCount}");
                 freshCount = dupCount = 0;
                 lastReport = now;
             }

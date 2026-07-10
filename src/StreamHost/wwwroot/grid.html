@@ -31,15 +31,18 @@
   header .ghost:hover { background: #242830; color: #e6e8eb; }
   /* Restore pill shown while the bar is hidden. Bottom-center: the tile
      corners belong to the streams' own controls (the top-right ✕ was
-     unreachable under the old chip). */
+     unreachable under the old chip). Invisible until the mouse is over the
+     window, like the viewer's hover controls. */
   #showBar {
     position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
     z-index: 10; height: 30px; padding: 0 16px;
     display: none; align-items: center; justify-content: center; gap: 6px;
     background: rgba(22, 24, 28, .75); border: 1px solid #2e333b; border-radius: 999px;
-    font-size: 12px; color: #9aa1ab; cursor: pointer; opacity: .55; user-select: none;
+    font-size: 12px; color: #9aa1ab; cursor: pointer; opacity: 0; user-select: none;
+    transition: opacity .25s;
   }
-  #showBar:hover { opacity: 1; color: #e6e8eb; }
+  body:hover #showBar { opacity: .55; }
+  body:hover #showBar:hover { opacity: 1; color: #e6e8eb; }
   #grid {
     flex: 1; display: grid; gap: 6px; padding: 6px; min-height: 0;
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 560px), 1fr));
@@ -221,8 +224,17 @@ function poll() {
         // rotates it, so refresh the saved link when it changes (reloads the tile).
         if (s.key && new URL(url).searchParams.get("k") !== s.key)
           window.addStream(new URL(url).origin + "/?k=" + encodeURIComponent(s.key));
+        // A tile opened while its host wasn't streaming sits on the browser's
+        // own error page, where no script of ours runs — reload the iframe when
+        // the host comes back. Two missed polls required so a single stats
+        // timeout on a congested link can't restart healthy playback (the key
+        // check above already covers restarts, but not --no-key or same-key).
+        else if (live && +tile.dataset.down >= 2)
+          tile.querySelector("iframe").src = url;
+        if (live) tile.dataset.down = 0;
       })
       .catch(() => {
+        tile.dataset.down = (+tile.dataset.down || 0) + 1;
         tile.classList.remove("live");
         if (tile.querySelector(".name").textContent === "…")
           tile.querySelector(".name").textContent = url.replace(/^https?:\/\//, "");
@@ -251,6 +263,8 @@ function applyBarVisibility() {
   const hidden = localStorage.getItem(HIDEBAR_KEY) === "1";
   headerEl.style.display = hidden ? "none" : "flex";
   showBar.style.display = hidden ? "flex" : "none";
+  // In the app's Watch window, the native Find-streams strip follows suit.
+  window.chrome?.webview?.postMessage({ barHidden: hidden });
   fixSpans();
 }
 document.getElementById("hideBtn").onclick = () => { localStorage.setItem(HIDEBAR_KEY, "1"); applyBarVisibility(); };

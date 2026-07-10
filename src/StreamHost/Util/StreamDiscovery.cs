@@ -30,6 +30,11 @@ public static class StreamDiscovery
             foreach (int port in portList)
                 endpoints.TryAdd($"{ip}:{port}", name);
 
+        // Loopback too: your own stream should show up even when the Tailscale
+        // backend is stopped (no tailnet IPs to enumerate then).
+        foreach (int port in portList)
+            endpoints.TryAdd($"127.0.0.1:{port}", Environment.MachineName);
+
         foreach (string remembered in LoadRemembered())
             endpoints.TryAdd(remembered, remembered.Split(':')[0]);
 
@@ -53,9 +58,25 @@ public static class StreamDiscovery
             catch { return null; }
         }).ToArray();
 
-        var found = (await Task.WhenAll(probes)).Where(s => s is not null).Select(s => s!).ToList();
-        SaveRemembered(found.Select(s => new Uri(s.Url).Authority));
+        // The host's own stream can answer on both its tailnet IP and loopback;
+        // collapse duplicates by view key, keeping the shareable (non-loopback)
+        // address. Keyless streams have nothing safe to collapse on.
+        var found = (await Task.WhenAll(probes)).Where(s => s is not null).Select(s => s!)
+            .GroupBy(s => KeyOf(s.Url) ?? s.Url)
+            .Select(g => g.OrderBy(s => new Uri(s.Url).Host == "127.0.0.1" ? 1 : 0).First())
+            .ToList();
+        SaveRemembered(found.Select(s => new Uri(s.Url).Authority).Where(a => !a.StartsWith("127.")));
         return found.OrderBy(s => s.StreamName, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private static string? KeyOf(string url)
+    {
+        try
+        {
+            string q = new Uri(url).Query;
+            return q.StartsWith("?k=") ? q[3..] : null;
+        }
+        catch { return null; }
     }
 
     /// <summary>IPv4 + hostname of every online tailnet peer, this machine included
@@ -87,6 +108,45 @@ public static class StreamDiscovery
         }
         catch { }
         return peers;
+    }
+
+    /// <summary>One line: each online peer and whether traffic to it goes direct
+    /// or through a DERP relay — the first thing to check when a viewer stutters.
+    /// Endpoint addresses are deliberately omitted (support bundles get pasted
+    /// around). "idle" means no recent traffic, so the path is undecided.</summary>
+    public static string DescribeTailnetPaths()
+    {
+        string? json = RunTailscale("status --json");
+        if (json is null) return "tailscale CLI not found or not running";
+        var parts = new List<string>();
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            // A stopped/logged-out backend still lists peers; reporting them as
+            // "idle" would read like a healthy-but-quiet link. Say what's wrong.
+            if (doc.RootElement.TryGetProperty("BackendState", out var bs)
+                && bs.GetString() is string state && state != "Running")
+                return $"tailscale not running (state: {state})";
+            if (doc.RootElement.TryGetProperty("Peer", out var peerMap) && peerMap.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var p in peerMap.EnumerateObject())
+                {
+                    var node = p.Value;
+                    if (node.TryGetProperty("Online", out var online) && !online.GetBoolean()) continue;
+                    string name = node.TryGetProperty("HostName", out var hn) ? hn.GetString() ?? "?" : "?";
+                    bool active = node.TryGetProperty("Active", out var a) && a.GetBoolean();
+                    string curAddr = node.TryGetProperty("CurAddr", out var ca) ? ca.GetString() ?? "" : "";
+                    string relay = node.TryGetProperty("Relay", out var r) ? r.GetString() ?? "" : "";
+                    string path = !active ? "idle"
+                        : curAddr.Length > 0 ? "direct"
+                        : relay.Length > 0 ? $"relay ({relay})"
+                        : "unknown";
+                    parts.Add($"{name}: {path}");
+                }
+            }
+        }
+        catch { return "tailscale status unreadable"; }
+        return parts.Count == 0 ? "no online peers" : string.Join(", ", parts);
     }
 
     private static string? RunTailscale(string args)

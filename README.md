@@ -5,20 +5,20 @@ people's browsers, over Tailscale or a private LAN. Transport is WebSocket,
 playback is Media Source Extensions (MSE). No WebRTC, no signaling server, no
 account.
 
-## What it's good at
+## Features
 
-- Exclusive-fullscreen games: monitor capture uses desktop duplication and
-  automatically switches capture method as needed, cursor included.
-- Per-application audio: pick which app's sound rides along with the stream
-  (the captured window, any other running app, or none), independent of your
-  voice chat.
+- Streams a whole monitor or a single window. Monitor capture uses desktop
+  duplication and switches capture method automatically, so
+  exclusive-fullscreen games work; the cursor is included.
+- Audio comes from whichever app you pick (the captured window, another
+  running app, or none), separate from your voice chat.
 - Hardware encoding (NVIDIA NVENC, AMD AMF, Intel QSV) with automatic
   fallback to CPU (libx264) if the GPU encoder fails or stalls mid-stream.
-  An encoder selector lets you pick a specific one or leave it on Auto.
-- Multiple streams at once: a grid page tiles every friend's stream in one
-  tab, side by side or stacked vertically.
-- A built-in Watch window for viewing without a browser, including a stream
-  finder that lists other live StreamHost machines on your Tailscale network.
+  An encoder selector can force a specific one, or leave it on Auto.
+- A grid page tiles several streams in one browser tab, side by side or
+  stacked.
+- A built-in Watch window shows the same grid without a browser and can
+  list live StreamHost machines on your Tailscale network.
 
 ## Requirements
 

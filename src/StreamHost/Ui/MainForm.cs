@@ -40,7 +40,7 @@ public sealed class MainForm : Form
         new("1440p · 60 fps  (~18 Mbps)", 1440, 60, 18000),
         // Kbps 0 = auto: the session picks the bitrate from the real output
         // resolution (native on a 1440p monitor needs 18 Mbps, not 1080p's 12).
-        new("Native · 60 fps  (auto bitrate)", 0, 60, 0),
+        new("Native · 60 fps  (bitrate matches resolution)", 0, 60, 0),
     ];
 
     private sealed record EncoderChoice(string Label, string Value)
@@ -87,9 +87,8 @@ public sealed class MainForm : Form
     private readonly ComboBox _audioCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 230, FlatStyle = FlatStyle.Flat };
     private readonly TextBox _nameInput = new() { Width = 150, MaxLength = 32, BorderStyle = BorderStyle.FixedSingle, Text = Environment.MachineName };
     private readonly Button _watchButton = new() { Text = "Watch streams", Width = 118, Height = 38 };
-    private readonly Button _copyLogButton = new() { Text = "Copy log", Width = 82, Height = 24, Anchor = AnchorStyles.Top | AnchorStyles.Right };
-    private readonly Button _bundleButton = new() { Text = "Copy support bundle", Width = 136, Height = 24, Anchor = AnchorStyles.Top | AnchorStyles.Right };
-    private readonly Button _fixPortButton = new() { Text = "Fix access", Width = 86, Height = 24, Visible = false, Anchor = AnchorStyles.Top | AnchorStyles.Right };
+    private readonly Button _bundleButton = new() { Text = "Copy log", Width = 82, Height = 24, Anchor = AnchorStyles.Top | AnchorStyles.Right };
+    private readonly Button _fixPortButton = new() { Text = "Fix access (open port)", Width = 142, Height = 24, Visible = false, Anchor = AnchorStyles.Top | AnchorStyles.Right };
     private readonly NumericUpDown _portInput = new() { Minimum = 1024, Maximum = 65535, Value = 8093, Width = 80 };
     private readonly Button _startButton = new() { Text = "▶  Start streaming", Width = 160, Height = 38 };
     private readonly Button _copyButton = new() { Text = "Copy link", Width = 92, Height = 38 };
@@ -128,32 +127,53 @@ public sealed class MainForm : Form
         ForeColor = Fg;
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { Icon = SystemIcons.Application; }
 
-        var sourceGroup = MakeGroup("What to share", 112);
-        var sourceGrid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2 };
+        // Audio lives with the source pickers: what you share and what it sounds
+        // like are one decision. Name/port are plumbing, off to their own box.
+        var sourceGroup = MakeGroup("What to share", 140);
+        var sourceGrid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 3 };
         sourceGrid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         sourceGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         sourceGrid.Controls.Add(_rbWindow, 0, 0);
         sourceGrid.Controls.Add(_windowCombo, 1, 0);
         sourceGrid.Controls.Add(_rbMonitor, 0, 1);
         sourceGrid.Controls.Add(_monitorCombo, 1, 1);
+        sourceGrid.Controls.Add(new Label { Text = "Audio:", AutoSize = true, Margin = new Padding(3, 8, 3, 0), ForeColor = Dim }, 0, 2);
+        sourceGrid.Controls.Add(_audioCombo, 1, 2);
+        _audioCombo.Width = 330;
         sourceGroup.Controls.Add(sourceGrid);
 
-        var settingsGroup = MakeGroup("Quality & options", 128);
-        var settingsFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = true };
-        settingsFlow.Controls.Add(new Label { Text = "Preset:", AutoSize = true, Margin = new Padding(0, 9, 4, 0), ForeColor = Dim });
-        settingsFlow.Controls.Add(_presetCombo);
-        settingsFlow.Controls.Add(new Label { Text = "Port:", AutoSize = true, Margin = new Padding(16, 9, 4, 0), ForeColor = Dim });
-        settingsFlow.Controls.Add(_portInput);
-        settingsFlow.SetFlowBreak(_portInput, true);
-        settingsFlow.Controls.Add(new Label { Text = "Audio:", AutoSize = true, Margin = new Padding(0, 9, 4, 0), ForeColor = Dim });
-        settingsFlow.Controls.Add(_audioCombo);
-        settingsFlow.Controls.Add(new Label { Text = "Name:", AutoSize = true, Margin = new Padding(16, 9, 4, 0), ForeColor = Dim });
-        settingsFlow.Controls.Add(_nameInput);
-        _nameInput.Margin = new Padding(0, 6, 0, 0);
-        settingsFlow.SetFlowBreak(_nameInput, true);
-        settingsFlow.Controls.Add(new Label { Text = "Encoder:", AutoSize = true, Margin = new Padding(0, 9, 4, 0), ForeColor = Dim });
-        settingsFlow.Controls.Add(_encoderCombo);
-        settingsGroup.Controls.Add(settingsFlow);
+        var optionsRow = new TableLayoutPanel { Dock = DockStyle.Top, Height = 104, ColumnCount = 2, BackColor = Bg };
+        optionsRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 58));
+        optionsRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 42));
+
+        var qualityGroup = MakeGroup("Quality", 0);
+        qualityGroup.Dock = DockStyle.Fill;
+        qualityGroup.Margin = new Padding(0, 0, 3, 0);
+        var qualityGrid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2 };
+        qualityGrid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        qualityGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        qualityGrid.Controls.Add(new Label { Text = "Preset:", AutoSize = true, Margin = new Padding(3, 8, 3, 0), ForeColor = Dim }, 0, 0);
+        qualityGrid.Controls.Add(_presetCombo, 1, 0);
+        qualityGrid.Controls.Add(new Label { Text = "Encoder:", AutoSize = true, Margin = new Padding(3, 8, 3, 0), ForeColor = Dim }, 0, 1);
+        qualityGrid.Controls.Add(_encoderCombo, 1, 1);
+        _presetCombo.Width = 250;
+        qualityGroup.Controls.Add(qualityGrid);
+
+        var miscGroup = MakeGroup("Misc", 0);
+        miscGroup.Dock = DockStyle.Fill;
+        miscGroup.Margin = new Padding(3, 0, 0, 0);
+        var miscGrid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2 };
+        miscGrid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        miscGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        miscGrid.Controls.Add(new Label { Text = "Name:", AutoSize = true, Margin = new Padding(3, 8, 3, 0), ForeColor = Dim }, 0, 0);
+        miscGrid.Controls.Add(_nameInput, 1, 0);
+        miscGrid.Controls.Add(new Label { Text = "Port:", AutoSize = true, Margin = new Padding(3, 8, 3, 0), ForeColor = Dim }, 0, 1);
+        miscGrid.Controls.Add(_portInput, 1, 1);
+        _nameInput.Margin = new Padding(3, 5, 3, 0);
+        miscGroup.Controls.Add(miscGrid);
+
+        optionsRow.Controls.Add(qualityGroup, 0, 0);
+        optionsRow.Controls.Add(miscGroup, 1, 0);
 
         var actionPanel = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 50, Padding = new Padding(8, 5, 0, 0), BackColor = Bg };
         actionPanel.Controls.Add(_startButton);
@@ -166,19 +186,16 @@ public sealed class MainForm : Form
 
         // TableLayout keeps the right-side buttons visible regardless of window
         // size / DPI scaling (manual X-positions drifted off the edge).
-        var statusPanel = new TableLayoutPanel { Dock = DockStyle.Top, Height = 32, BackColor = Bg, ColumnCount = 4, Padding = new Padding(12, 4, 8, 0) };
+        var statusPanel = new TableLayoutPanel { Dock = DockStyle.Top, Height = 32, BackColor = Bg, ColumnCount = 3, Padding = new Padding(12, 4, 8, 0) };
         statusPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        statusPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         statusPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         statusPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         statusPanel.Controls.Add(_statusLabel, 0, 0);
         statusPanel.Controls.Add(_fixPortButton, 1, 0);
         statusPanel.Controls.Add(_bundleButton, 2, 0);
-        statusPanel.Controls.Add(_copyLogButton, 3, 0);
         _statusLabel.Anchor = AnchorStyles.Left;
         _fixPortButton.Anchor = AnchorStyles.Right;
         _bundleButton.Anchor = AnchorStyles.Right;
-        _copyLogButton.Anchor = AnchorStyles.Right;
         _statusLabel.ForeColor = Dim;
 
         var logPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(8, 4, 8, 8), BackColor = Bg };
@@ -187,7 +204,7 @@ public sealed class MainForm : Form
         Controls.Add(logPanel);
         Controls.Add(statusPanel);
         Controls.Add(actionPanel);
-        Controls.Add(settingsGroup);
+        Controls.Add(optionsRow);
         Controls.Add(sourceGroup);
 
         _presetCombo.Items.AddRange(Presets);
@@ -203,11 +220,6 @@ public sealed class MainForm : Form
         _linkBox.ForeColor = Dim;
 
         // Nothing gets disabled — the selected radio decides which combo is USED.
-        _copyLogButton.Click += (_, _) =>
-        {
-            try { Clipboard.SetText(_logBox.Text.Length > 0 ? _logBox.Text : "(log empty)"); AppendLog("Log copied to clipboard."); }
-            catch (Exception ex) { AppendLog($"Clipboard failed: {ex.Message}"); }
-        };
         _windowCombo.DropDown += (_, _) => PopulateWindows();   // fresh list every open
         _monitorCombo.DropDown += (_, _) => PopulateMonitors(); // monitors change too (dock/undock)
         _rbWindow.CheckedChanged += (_, _) => UpdateAudioModeLabel();
@@ -217,7 +229,7 @@ public sealed class MainForm : Form
             if (_pendingCpuRetry) { _pendingCpuRetry = false; OnSessionStopped(null); return; }
             if (_session is null) StartStream(); else StopStream();
         };
-        _switchButton.Click += (_, _) => SwitchSource();
+        _switchButton.Click += (_, _) => ShowSwitchDialog();
         _copyButton.Click += (_, _) => CopyLink(BuildUrl(""));
         _watchButton.Click += (_, _) => OpenWatchWindow();
         _bundleButton.Click += (_, _) => CopySupportBundle();
@@ -570,6 +582,89 @@ public sealed class MainForm : Form
         _session.RequestStop();
     }
 
+    /// <summary>Guided switch: a small popup with just the source, preset, and
+    /// audio pickers, prefilled from the current selections. OK writes the
+    /// choices back to the main controls and goes through the normal switch
+    /// (or plain start when idle), so both paths stay one code path.</summary>
+    private void ShowSwitchDialog()
+    {
+        if (_stopping) return;
+        PopulateSources(); // fresh window/monitor lists for the popup
+
+        using var dlg = new Form
+        {
+            Text = "Switch source",
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            MinimizeBox = false,
+            MaximizeBox = false,
+            ShowInTaskbar = false,
+            StartPosition = FormStartPosition.CenterParent,
+            ClientSize = new Size(480, 208),
+            BackColor = Bg,
+            ForeColor = Fg,
+        };
+        dlg.HandleCreated += (_, _) => { int on = 1; _ = DwmSetWindowAttribute(dlg.Handle, 20, ref on, sizeof(int)); };
+
+        var rbWin = new RadioButton { Text = "Game / window", AutoSize = true, Checked = _rbWindow.Checked };
+        var rbMon = new RadioButton { Text = "Whole monitor", AutoSize = true, Checked = _rbMonitor.Checked };
+        var winCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 330, FlatStyle = FlatStyle.Flat };
+        var monCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 330, FlatStyle = FlatStyle.Flat };
+        var presetCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 250, FlatStyle = FlatStyle.Flat };
+        var audioCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 330, FlatStyle = FlatStyle.Flat };
+
+        // Mirror the main combos item-for-item so OK can copy indexes back.
+        foreach (object it in _windowCombo.Items) winCombo.Items.Add(it);
+        foreach (object it in _monitorCombo.Items) monCombo.Items.Add(it);
+        foreach (object it in _presetCombo.Items) presetCombo.Items.Add(it);
+        foreach (object it in _audioCombo.Items) audioCombo.Items.Add(it);
+        winCombo.SelectedIndex = _windowCombo.SelectedIndex;
+        monCombo.SelectedIndex = _monitorCombo.SelectedIndex;
+        presetCombo.SelectedIndex = _presetCombo.SelectedIndex;
+        audioCombo.SelectedIndex = _audioCombo.SelectedIndex;
+        rbWin.CheckedChanged += (_, _) =>
+        {
+            if (audioCombo.Items.Count >= 2)
+                audioCombo.Items[1] = rbWin.Checked
+                    ? "Captured window's audio"
+                    : "No audio (monitor share: pick an app below)";
+        };
+
+        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 5, Padding = new Padding(10) };
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        grid.Controls.Add(rbWin, 0, 0);
+        grid.Controls.Add(winCombo, 1, 0);
+        grid.Controls.Add(rbMon, 0, 1);
+        grid.Controls.Add(monCombo, 1, 1);
+        grid.Controls.Add(new Label { Text = "Preset:", AutoSize = true, Margin = new Padding(3, 8, 3, 0), ForeColor = Dim }, 0, 2);
+        grid.Controls.Add(presetCombo, 1, 2);
+        grid.Controls.Add(new Label { Text = "Audio:", AutoSize = true, Margin = new Padding(3, 8, 3, 0), ForeColor = Dim }, 0, 3);
+        grid.Controls.Add(audioCombo, 1, 3);
+
+        var ok = new Button { Text = _session is null ? "Start" : "Switch", Width = 96, Height = 28, DialogResult = DialogResult.OK };
+        var cancel = new Button { Text = "Cancel", Width = 80, Height = 28, DialogResult = DialogResult.Cancel };
+        var buttons = new FlowLayoutPanel { FlowDirection = FlowDirection.RightToLeft, Dock = DockStyle.Fill, Margin = new Padding(0, 6, 0, 0) };
+        buttons.Controls.Add(cancel);
+        buttons.Controls.Add(ok);
+        grid.SetColumnSpan(buttons, 2);
+        grid.Controls.Add(buttons, 0, 4);
+        dlg.Controls.Add(grid);
+        dlg.AcceptButton = ok;
+        dlg.CancelButton = cancel;
+        ApplyDarkTheme(dlg);
+        ok.BackColor = AccentDark;
+
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+
+        _rbWindow.Checked = rbWin.Checked;
+        _rbMonitor.Checked = rbMon.Checked;
+        if (winCombo.SelectedIndex >= 0) _windowCombo.SelectedIndex = winCombo.SelectedIndex;
+        if (monCombo.SelectedIndex >= 0) _monitorCombo.SelectedIndex = monCombo.SelectedIndex;
+        if (presetCombo.SelectedIndex >= 0) _presetCombo.SelectedIndex = presetCombo.SelectedIndex;
+        if (audioCombo.SelectedIndex >= 0) _audioCombo.SelectedIndex = audioCombo.SelectedIndex;
+        SwitchSource();
+    }
+
     /// <summary>Restart with whatever the UI currently selects, keeping the port
     /// and viewer key, so viewer links survive and pages auto-reconnect after a
     /// short blip. Under the hood it is a clean stop + start.</summary>
@@ -748,16 +843,20 @@ public sealed class MainForm : Form
     }
 
     /// <summary>Everything needed to debug a report, one clipboard copy:
-    /// version, OS, GPUs, ffmpeg, encoder cache, session state, settings, log tail.</summary>
-    private void CopySupportBundle()
+    /// version, OS, GPUs, ffmpeg, tailnet paths, encoder cache, session state,
+    /// settings, log tail.</summary>
+    private async void CopySupportBundle()
     {
         try
         {
+            // The tailscale CLI can block for seconds; keep it off the UI thread.
+            string tailnet = await Task.Run(Util.StreamDiscovery.DescribeTailnetPaths);
             var sb = new System.Text.StringBuilder();
             sb.AppendLine($"StreamHost {AppVersion()}");
             sb.AppendLine($"Windows:  {Environment.OSVersion.VersionString}");
             sb.AppendLine($"GPUs:     {string.Join("; ", GpuAdapters())}");
             sb.AppendLine($"ffmpeg:   {FfmpegVersionLine()}");
+            sb.AppendLine($"tailnet:  {tailnet}");
             sb.AppendLine($"enc cache: {ReadSmallFile(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "StreamHost", "encoder.cache"))}");
             sb.AppendLine(_session is { } s
                 ? $"session:  {s.Description} via {s.ActiveEncoder}, state {s.Broadcaster?.State}, viewers {s.Broadcaster?.ViewerCount}, localOnly {s.LocalOnly}"
@@ -768,11 +867,11 @@ public sealed class MainForm : Form
             foreach (string line in lines.Skip(Math.Max(0, lines.Length - 200)))
                 sb.AppendLine(RedactKey(line));
             Clipboard.SetText(sb.ToString());
-            AppendLog("Support bundle copied — paste it into a bug report.");
+            AppendLog("Log copied (with version, system, and encoder info) — paste it into a bug report.");
         }
         catch (Exception ex)
         {
-            AppendLog($"Support bundle failed: {ex.Message}");
+            AppendLog($"Copy log failed: {ex.Message}");
         }
     }
 

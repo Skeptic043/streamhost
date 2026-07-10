@@ -35,15 +35,17 @@ STREAMING
 
 The window minimizes to the tray and keeps streaming. The app waits for
 the first captured frame before reporting the stream as live. If it
-stops with a capture error instead, use "Copy log" (or "Copy support
-bundle" for a fuller report: version, system, GPU, encoder, and recent
-log) and send that along.
+stops with a capture error instead, use "Copy log" (it includes
+version, system, GPU, and encoder info along with the recent log)
+and send that along.
 
 WATCHING MULTIPLE STREAMS, THE GRID
 ------------------------------------
-Anyone streaming also serves a grid page ("Copy grid link" in the app,
-or add "grid" to a stream link). Open it, paste each friend's stream
-link once, every live stream tiles into one tab. Reorder tiles with
+Anyone streaming also serves a grid page at http://<their address>:<port>/grid
+(a stream link with /grid in place of everything after the port).
+Open it, paste each friend's stream link once, every live stream tiles
+into one tab. Easier: the app's "Watch streams" window is the same grid
+with a stream finder built in. Reorder tiles with
 the arrow buttons, and switch between side-by-side and stacked layout;
 the list is remembered by your browser.
 
@@ -73,9 +75,9 @@ TIPS
 IF SOMETHING BREAKS
 -------------------
 Every run writes a log file (path is printed at the top of the app's
-log panel; tray icon -> Open logs folder). "Copy log" puts the current
-session's log on the clipboard, "Copy support bundle" adds version,
-system, GPU, and encoder info. Paste either when reporting a problem.
+log panel; tray icon -> Open logs folder). "Copy log" puts the session
+log plus version, system, GPU, and encoder info on the clipboard.
+Paste it when reporting a problem.
 
 - Stream page never loads: the port isn't open yet, or Tailscale isn't
   connected on one end. Click "Fix access" in the app (or run setup.bat

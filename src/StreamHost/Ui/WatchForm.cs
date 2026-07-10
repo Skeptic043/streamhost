@@ -10,8 +10,9 @@ namespace StreamHost.Ui;
 /// In-app viewer: the grid page hosted in WebView2 (the Chromium engine that
 /// ships with Windows), so everyone gets identical playback behavior without
 /// depending on whichever browser a friend prefers. Stream links added here
-/// persist in the app's own profile. A "Find streams" strip above the grid
-/// probes the tailnet for live StreamHost peers and adds them with one click.
+/// persist in the app's own profile. A "Find streams" strip below the grid
+/// probes the tailnet for live StreamHost peers and adds them with one click;
+/// it searches once when the window opens, then only on the button.
 /// </summary>
 public sealed class WatchForm : Form
 {
@@ -20,19 +21,20 @@ public sealed class WatchForm : Form
     private static readonly Color Border = Color.FromArgb(60, 65, 74);
     private static readonly Color Fg = Color.FromArgb(212, 216, 222);
     private static readonly Color Dim = Color.FromArgb(150, 156, 165);
+    // Same color as the grid page's header bar so the two read as one chrome.
+    private static readonly Color BarBg = Color.FromArgb(22, 24, 28);
 
     private readonly WebView2 _web = new() { Dock = DockStyle.Fill };
     private readonly FlowLayoutPanel _finder = new()
     {
-        Dock = DockStyle.Top,
+        Dock = DockStyle.Bottom,
         Height = 38,
-        Padding = new Padding(6, 4, 6, 0),
-        BackColor = Bg,
+        Padding = new Padding(6, 6, 6, 0),
+        BackColor = BarBg,
         WrapContents = false,
     };
     private readonly Button _findButton = new() { Text = "↻ Find streams", Width = 110, Height = 26 };
-    private readonly Label _finderStatus = new() { AutoSize = true, ForeColor = Dim, Margin = new Padding(8, 8, 0, 0) };
-    private readonly System.Windows.Forms.Timer _findTimer = new() { Interval = 30000 };
+    private readonly Label _finderStatus = new() { AutoSize = true, ForeColor = Dim, Margin = new Padding(8, 10, 0, 0) };
     private readonly int _extraPort;
     private bool _finding;
     private bool _webReady;
@@ -68,9 +70,7 @@ public sealed class WatchForm : Form
         Controls.Add(_fallback);
         Controls.Add(_finder);
 
-        _findTimer.Tick += (_, _) => _ = FindStreamsAsync();
         Load += async (_, _) => await InitAsync();
-        FormClosed += (_, _) => _findTimer.Stop();
     }
 
     protected override void OnHandleCreated(EventArgs e)
@@ -107,9 +107,20 @@ public sealed class WatchForm : Form
                 e.Handled = true;
                 try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(e.Uri) { UseShellExecute = true }); } catch { }
             };
+            // The grid page reports its add-bar visibility; the finder strip
+            // follows it so "Hide bar" clears all the chrome at once.
+            _web.CoreWebView2.WebMessageReceived += (_, e) =>
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(e.WebMessageAsJson);
+                    if (doc.RootElement.TryGetProperty("barHidden", out var h))
+                        _finder.Visible = !h.GetBoolean();
+                }
+                catch { }
+            };
             _web.CoreWebView2.Navigate("http://streamhost.local/grid.html");
             _webReady = true;
-            _findTimer.Start();
             _ = FindStreamsAsync();
         }
         catch (Exception ex)
