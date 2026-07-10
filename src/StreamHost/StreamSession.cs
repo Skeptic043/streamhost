@@ -22,8 +22,15 @@ public sealed record SessionConfig
     public string StreamName { get; init; } = "";
     public uint AudioPid { get; init; }
     public int Fps { get; init; } = 60;
+
+    /// <summary>0 = pick automatically from the actual output resolution.</summary>
     public int BitrateKbps { get; init; } = 12000;
     public int Port { get; init; } = 8093;
+
+    /// <summary>Per-session viewer secret; the viewer page and WebSocket require
+    /// it as ?k=. Null = no key required. Survives CPU-fallback and source-switch
+    /// restarts so links keep working within one streaming run.</summary>
+    public string? ViewKey { get; init; }
     public int OutHeight { get; init; }          // 0 = native; else scale to this height (AR kept)
     public string Encoder { get; init; } = "auto";
     public int FragMs { get; init; } = 50;
@@ -32,6 +39,14 @@ public sealed record SessionConfig
     /// <summary>Monitor shares only: use DXGI desktop duplication instead of WGC.
     /// Sees exclusive-fullscreen games (which freeze under WGC) but omits the cursor.</summary>
     public bool CompatibilityCapture { get; init; }
+
+    /// <summary>Short random viewer key for the ?k= link parameter.</summary>
+    public static string NewViewKey()
+    {
+        const string chars = "abcdefghjkmnpqrstuvwxyz23456789";
+        byte[] bytes = System.Security.Cryptography.RandomNumberGenerator.GetBytes(8);
+        return new string(bytes.Select(b => chars[b % chars.Length]).ToArray());
+    }
 }
 
 /// <summary>
@@ -53,7 +68,12 @@ public sealed class StreamSession
 
     public Broadcaster? Broadcaster { get; private set; }
     public string? Description { get; private set; }
+
+    /// <summary>The encoder actually running (after auto-pick and probe), e.g. "h264_nvenc".</summary>
+    public string? ActiveEncoder { get; private set; }
+    public string? ViewKey => _config.ViewKey;
     public bool IsRunning => _thread is { IsAlive: true };
+    public bool IsStopping => _cts.IsCancellationRequested;
 
     /// <summary>True when the server could only bind localhost (no URL ACL for this port).</summary>
     public bool LocalOnly { get; private set; }
@@ -80,10 +100,18 @@ public sealed class StreamSession
         _thread.Start();
     }
 
+    /// <summary>Non-blocking stop for the UI: cancel and let the Stopped event
+    /// report when teardown (including port release) actually finished. The
+    /// session thread disposes server/encoder/capture before Stopped fires, so
+    /// "Stopped fired" means the port is free for the next session.</summary>
+    public void RequestStop() => _cts.Cancel();
+
+    /// <summary>Blocking stop for process exit paths: don't leave an orphaned
+    /// ffmpeg behind just because the app window closed.</summary>
     public void Stop()
     {
         _cts.Cancel();
-        _thread?.Join(4000);
+        _thread?.Join(6000);
     }
 
     [DllImport("kernel32.dll")]
@@ -126,6 +154,13 @@ public sealed class StreamSession
         }
 
         string encoder = FfmpegEncoder.PickEncoder(capture.GpuVendorId, _config.Encoder);
+        ActiveEncoder = encoder;
+
+        // 0 = auto: scale bitrate with what actually goes out. A "Native" preset
+        // used to hardcode 12 Mbps even when native meant 1440p or 4K.
+        int bitrateKbps = _config.BitrateKbps > 0 ? _config.BitrateKbps : AutoBitrate(outH, _config.Fps);
+        if (_config.BitrateKbps <= 0)
+            Console.WriteLine($"[encoder] auto bitrate for {outH}p{_config.Fps}: {bitrateKbps} kbps");
 
         string? audioPipeName = _config.AudioPid != 0 ? $"streamhost_audio_{_config.Port}" : null;
         NamedPipeServerStream? audioPipe = null;
@@ -134,7 +169,7 @@ public sealed class StreamSession
                 PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
 
         using var ffmpeg = new FfmpegEncoder(capture.Width, capture.Height, _config.Fps,
-            _config.BitrateKbps, outW, outH, encoder, audioPipeName, _config.FragMs);
+            bitrateKbps, outW, outH, encoder, audioPipeName, _config.FragMs);
 
         if (audioPipe is not null)
         {
@@ -187,7 +222,7 @@ public sealed class StreamSession
         Broadcaster = broadcaster;
         var splitterTask = Task.Run(() => Mp4Splitter.RunAsync(ffmpeg.Output, broadcaster, ct), ct);
 
-        using var server = new WebServer(_config.Port, broadcaster);
+        using var server = new WebServer(_config.Port, broadcaster, _config.ViewKey);
         var serverTask = Task.Run(() => server.RunAsync(ct), ct);
         LocalOnly = server.BoundPrefix.Contains("localhost");
         if (LocalOnly)
@@ -196,7 +231,7 @@ public sealed class StreamSession
         // First-frame gate: Windows capture always delivers the current contents
         // immediately on start, so "no frame within 5s" reliably means the capture
         // backend is broken on this machine — fail loudly instead of looking live.
-        Description = $"{outW}x{outH}@{_config.Fps} ~{_config.BitrateKbps}kbps via {encoder}";
+        Description = $"{outW}x{outH}@{_config.Fps} ~{bitrateKbps}kbps";
         var gateStart = Stopwatch.GetTimestamp();
         while (capture.FrameVersion == 0)
         {
@@ -216,10 +251,13 @@ public sealed class StreamSession
         }
 
         broadcaster.State = "live";
-        Console.WriteLine($"[ready] first frame captured — streaming {Description}");
-        Console.WriteLine($"[ready] watch at: http://localhost:{_config.Port}/");
+        // Console users have no other way to get the link, so the key is printed
+        // (and therefore lands in the log file) — the support bundle strips it.
+        string keySuffix = _config.ViewKey is null ? "" : $"?k={_config.ViewKey}";
+        Console.WriteLine($"[ready] first frame captured — streaming {Description} via {encoder}");
+        Console.WriteLine($"[ready] watch at: http://localhost:{_config.Port}/{keySuffix}");
         foreach (var ip in GetShareAddresses())
-            Console.WriteLine($"[ready]           http://{ip}:{_config.Port}/");
+            Console.WriteLine($"[ready]           http://{ip}:{_config.Port}/{keySuffix}");
 
         // Independent encoder-output watchdog. A stalled GPU encoder makes ffmpeg
         // stop reading stdin, which blocks the pacing loop itself — so the stall
@@ -252,7 +290,7 @@ public sealed class StreamSession
         { IsBackground = true, Name = "encoder-watchdog" };
         watchdog.Start();
 
-        string exitReason = PacingLoop(capture, ffmpeg, broadcaster, ct);
+        string exitReason = PacingLoop(capture, ffmpeg, broadcaster, splitterTask, serverTask, ct);
         if (_encoderStalled) exitReason = "encoder-stall";
         broadcaster.State = _encoderStalled ? "failed" : "stopped";
 
@@ -268,7 +306,8 @@ public sealed class StreamSession
         return exitReason;
     }
 
-    private string PacingLoop(ICaptureSource capture, FfmpegEncoder ffmpeg, Broadcaster broadcaster, CancellationToken ct)
+    private string PacingLoop(ICaptureSource capture, FfmpegEncoder ffmpeg, Broadcaster broadcaster,
+        Task splitterTask, Task serverTask, CancellationToken ct)
     {
         using var timer = new HighResTimer();
         if (!timer.IsHighResolution)
@@ -296,6 +335,18 @@ public sealed class StreamSession
             if (capture.CaptureError is not null)
             {
                 return $"capture failed mid-stream: {capture.CaptureError.Message}";
+            }
+            // Supervise the background halves: a dead splitter otherwise shows up
+            // later as a bogus "encoder stall", a dead server as a silent stream.
+            if (splitterTask.IsFaulted)
+            {
+                Console.Error.WriteLine($"[mp4] splitter failed: {splitterTask.Exception?.GetBaseException().Message}");
+                return "mp4 splitter failed — see log";
+            }
+            if (serverTask.IsFaulted)
+            {
+                Console.Error.WriteLine($"[http] server failed: {serverTask.Exception?.GetBaseException().Message}");
+                return "web server failed — see log";
             }
 
             bool fresh = capture.WaitForFreshFrame(lastVersion, graceMs);
@@ -336,24 +387,78 @@ public sealed class StreamSession
         return "stopped";
     }
 
-    /// <summary>Shareable IPv4s, best first: Tailscale (100.64/10), then private LAN ranges.</summary>
+    /// <summary>Matches the quality presets: 12 Mbps at 1080p60, 18 at 1440p60,
+    /// 24 at 4K60; 30 fps gets two thirds.</summary>
+    private static int AutoBitrate(int outHeight, int fps)
+    {
+        int at60 = outHeight <= 720 ? 6000
+                 : outHeight <= 1080 ? 12000
+                 : outHeight <= 1440 ? 18000
+                 : 24000;
+        return fps >= 60 ? at60 : at60 * 2 / 3;
+    }
+
+    /// <summary>Shareable IPv4s, best first. Ranks by the owning adapter, not just
+    /// the address range: an active Tailscale interface wins, then physical private
+    /// LAN adapters with a default route. Hyper-V/WSL/Docker/VM adapters and
+    /// link-local addresses are excluded entirely — copying one of those produced
+    /// links that worked for the streamer and nobody else.</summary>
     public static List<string> GetShareAddresses()
     {
-        static int Rank(IPAddress a)
+        var ranked = new List<(int Rank, string Addr)>();
+        try
         {
-            byte[] b = a.GetAddressBytes();
-            if (b[0] == 100 && b[1] >= 64 && b[1] <= 127) return 0; // Tailscale / CGNAT
-            if (b[0] == 192 && b[1] == 168) return 1;
-            if (b[0] == 10) return 1;
-            if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) return 1;
-            if (b[0] == 169 && b[1] == 254) return 3;               // link-local junk
-            return 2;
+            foreach (var nic in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (nic.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
+                if (nic.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Loopback) continue;
+
+                string label = $"{nic.Name} {nic.Description}";
+                bool isTailscale = label.Contains("Tailscale", StringComparison.OrdinalIgnoreCase);
+                bool isVirtual =
+                    label.Contains("Hyper-V", StringComparison.OrdinalIgnoreCase) ||
+                    label.Contains("vEthernet", StringComparison.OrdinalIgnoreCase) ||
+                    label.Contains("WSL", StringComparison.OrdinalIgnoreCase) ||
+                    label.Contains("Docker", StringComparison.OrdinalIgnoreCase) ||
+                    label.Contains("VirtualBox", StringComparison.OrdinalIgnoreCase) ||
+                    label.Contains("VMware", StringComparison.OrdinalIgnoreCase) ||
+                    label.Contains("Loopback", StringComparison.OrdinalIgnoreCase);
+
+                var props = nic.GetIPProperties();
+                bool hasGateway = props.GatewayAddresses
+                    .Any(g => g.Address.AddressFamily == AddressFamily.InterNetwork);
+
+                foreach (var ua in props.UnicastAddresses)
+                {
+                    if (ua.Address.AddressFamily != AddressFamily.InterNetwork) continue;
+                    byte[] b = ua.Address.GetAddressBytes();
+                    if (b[0] == 169 && b[1] == 254) continue; // link-local
+                    bool cgnat = b[0] == 100 && b[1] >= 64 && b[1] <= 127; // Tailscale range
+                    bool privateRange = b[0] == 10 || (b[0] == 192 && b[1] == 168) ||
+                                        (b[0] == 172 && b[1] >= 16 && b[1] <= 31);
+
+                    // Only ranges viewers can actually reach: the firewall rule
+                    // admits Tailscale + private LAN, so a Radmin-VPN-style 26.x
+                    // or public address would be a dead link.
+                    if (!cgnat && !privateRange) continue;
+                    if (isVirtual && !isTailscale && !cgnat) continue;
+                    int rank = isTailscale || cgnat ? 0
+                             : hasGateway ? 1
+                             : 2;
+                    ranked.Add((rank, ua.Address.ToString()));
+                }
+            }
         }
+        catch { }
+
+        if (ranked.Count > 0)
+            return ranked.OrderBy(r => r.Rank).Select(r => r.Addr).Distinct().ToList();
+
+        // Fallback: the old DNS-based list, better than handing out nothing.
         try
         {
             return Dns.GetHostAddresses(Dns.GetHostName())
                 .Where(a => a.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(a))
-                .OrderBy(Rank)
                 .Select(a => a.ToString())
                 .ToList();
         }

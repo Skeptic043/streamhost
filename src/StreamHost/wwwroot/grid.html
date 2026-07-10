@@ -29,12 +29,15 @@
   header .spacer { flex: 1; }
   header .ghost { background: #1d2026; border: 1px solid #2e333b; color: #9aa1ab; }
   header .ghost:hover { background: #242830; color: #e6e8eb; }
-  /* Restore chip shown while the bar is hidden: faint until hovered. */
+  /* Restore pill shown while the bar is hidden. Bottom-center: the tile
+     corners belong to the streams' own controls (the top-right ✕ was
+     unreachable under the old chip). */
   #showBar {
-    position: fixed; top: 8px; right: 8px; z-index: 10; width: 30px; height: 30px;
-    display: none; align-items: center; justify-content: center;
-    background: rgba(22, 24, 28, .6); border: 1px solid #2e333b; border-radius: 8px;
-    color: #9aa1ab; cursor: pointer; opacity: .3; user-select: none;
+    position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
+    z-index: 10; height: 30px; padding: 0 16px;
+    display: none; align-items: center; justify-content: center; gap: 6px;
+    background: rgba(22, 24, 28, .75); border: 1px solid #2e333b; border-radius: 999px;
+    font-size: 12px; color: #9aa1ab; cursor: pointer; opacity: .55; user-select: none;
   }
   #showBar:hover { opacity: 1; color: #e6e8eb; }
   #grid {
@@ -73,9 +76,10 @@
   <button id="addBtn">Add</button>
   <span class="hint">Streams you add are remembered in this browser.</span>
   <span class="spacer"></span>
+  <button id="layoutBtn" class="ghost" title="Switch between side-by-side and stacked streams">Stack vertically</button>
   <button id="hideBtn" class="ghost" title="Hide this bar">Hide bar</button>
 </header>
-<div id="showBar" title="Show the add-stream bar">&#9776;</div>
+<div id="showBar" title="Show the add-stream bar">&#9776; add streams</div>
 <div id="grid"></div>
 <div id="empty">No streams added yet.<br>Paste each friend's stream link above once — they'll stick around.</div>
 
@@ -93,7 +97,12 @@ function normalize(u) {
   u = u.trim();
   if (!u) return null;
   if (!/^https?:\/\//i.test(u)) u = "http://" + u;
-  try { const parsed = new URL(u); return parsed.origin + "/"; } catch { return null; }
+  // Keep the viewer key (?k=) — the stream is unwatchable without it.
+  try {
+    const parsed = new URL(u);
+    const k = parsed.searchParams.get("k");
+    return parsed.origin + "/" + (k ? "?k=" + encodeURIComponent(k) : "");
+  } catch { return null; }
 }
 
 function render() {
@@ -150,21 +159,55 @@ function render() {
 
 // With an odd tile count the auto-fit grid leaves a dead cell (3 streams in a
 // 2-wide grid = one empty quarter). Widen the last tile to fill its row.
+// Clamp the column count to the tile count: auto-fit creates more (collapsed)
+// tracks than tiles on wide windows, and counting those made 2 tiles split
+// 1/3 + 2/3 on a monitor-width window.
 function fixSpans() {
   const tiles = grid.children;
   for (const t of tiles) t.style.gridColumn = "";
-  if (!tiles.length) return;
-  const cols = getComputedStyle(grid).gridTemplateColumns.split(" ").length;
+  if (!tiles.length || stacked()) return;
+  const tracks = getComputedStyle(grid).gridTemplateColumns.split(" ").length;
+  const cols = Math.min(tracks, tiles.length);
   const leftover = tiles.length % cols;
   if (cols > 1 && leftover !== 0)
     tiles[tiles.length - 1].style.gridColumn = `span ${cols - leftover + 1}`;
 }
 window.addEventListener("resize", fixSpans);
 
+// Layout: side-by-side auto-fit (default) or one column stacked vertically.
+const LAYOUT_KEY = "streamhost_grid_layout";
+const layoutBtn = document.getElementById("layoutBtn");
+function stacked() { return localStorage.getItem(LAYOUT_KEY) === "stack"; }
+function applyLayout() {
+  grid.style.gridTemplateColumns = stacked() ? "1fr" : "";
+  layoutBtn.textContent = stacked() ? "Side by side" : "Stack vertically";
+  fixSpans();
+}
+layoutBtn.onclick = () => {
+  localStorage.setItem(LAYOUT_KEY, stacked() ? "auto" : "stack");
+  applyLayout();
+};
+applyLayout();
+
+// One-click add used by the app's Find streams panel (and reusable from the
+// console). Dedupes by host: a re-add with a fresh key replaces the old entry.
+window.addStream = function (u) {
+  const n = normalize(u);
+  if (!n) return false;
+  const urls = load();
+  const origin = new URL(n).origin;
+  const i = urls.findIndex(x => { try { return new URL(x).origin === origin; } catch { return false; } });
+  if (i >= 0) { if (urls[i] === n) return true; urls[i] = n; }
+  else urls.push(n);
+  save(urls);
+  render();
+  return true;
+};
+
 function poll() {
   for (const tile of grid.children) {
     const url = tile.dataset.url;
-    fetch(url + "api/stats", { signal: AbortSignal.timeout(3000) })
+    fetch(new URL("api/stats", url), { signal: AbortSignal.timeout(3000) })
       .then(r => r.json())
       .then(s => {
         // "Responded" is not "live": require the host's own health state.
@@ -174,6 +217,10 @@ function poll() {
         tile.querySelector(".state").textContent = live
           ? `${s.sourceFps} fps · ${s.viewers} watching`
           : (s.state || "not streaming");
+        // Hosts hand the current viewer key to tailnet/local callers; a restart
+        // rotates it, so refresh the saved link when it changes (reloads the tile).
+        if (s.key && new URL(url).searchParams.get("k") !== s.key)
+          window.addStream(new URL(url).origin + "/?k=" + encodeURIComponent(s.key));
       })
       .catch(() => {
         tile.classList.remove("live");
@@ -213,12 +260,7 @@ applyBarVisibility();
 document.getElementById("addBtn").onclick = add;
 urlInput.addEventListener("keydown", e => { if (e.key === "Enter") add(); });
 function add() {
-  const url = normalize(urlInput.value);
-  if (!url) return;
-  const urls = load();
-  if (!urls.includes(url)) { urls.push(url); save(urls); }
-  urlInput.value = "";
-  render();
+  if (window.addStream(urlInput.value)) urlInput.value = "";
 }
 
 render();

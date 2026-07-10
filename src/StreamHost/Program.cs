@@ -10,20 +10,32 @@ internal static class Program
     private static extern uint timeBeginPeriod(uint ms);
 
     [DllImport("kernel32.dll")]
-    private static extern IntPtr GetConsoleWindow();
+    private static extern bool AttachConsole(int pid);
 
-    [DllImport("user32.dll")]
-    private static extern bool ShowWindow(IntPtr hWnd, int cmd);
+    [DllImport("kernel32.dll")]
+    private static extern bool AllocConsole();
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetStdHandle(int nStdHandle);
 
     [STAThread]
     private static int Main(string[] args)
     {
         timeBeginPeriod(1);
 
+        // Elevated self-invocation from the "Fix access" button: configure the
+        // port silently and report via exit code. No console, no UI.
+        if (args.Length >= 2 && args[0] == "--setup-port" && int.TryParse(args[1], out int setupPort))
+        {
+            string? setupUser = null;
+            for (int i = 2; i < args.Length - 1; i++)
+                if (args[i] == "--setup-user") setupUser = args[i + 1];
+            return Util.PortSetup.Run(setupPort, setupUser);
+        }
+
         // Double-click (no args) → the app window. CLI args → console mode.
         if (args.Length == 0)
         {
-            ShowWindow(GetConsoleWindow(), 0 /* SW_HIDE */);
             Util.ConsoleMirror.Install();
             System.Windows.Forms.Application.SetHighDpiMode(System.Windows.Forms.HighDpiMode.SystemAware);
             System.Windows.Forms.Application.EnableVisualStyles();
@@ -39,8 +51,26 @@ internal static class Program
         return RunConsole(args);
     }
 
+    /// <summary>The exe is WinExe (no console window on double-click), so console
+    /// mode has to attach to the launching terminal — or create a console when
+    /// started with args from Explorer. When stdout was redirected at launch
+    /// (piping, > file) the handles already work and nothing is touched.</summary>
+    private static void EnsureConsole()
+    {
+        IntPtr stdout = GetStdHandle(-11 /* STD_OUTPUT_HANDLE */);
+        if (stdout != IntPtr.Zero && stdout != new IntPtr(-1)) return; // redirected: already usable
+        if (!AttachConsole(-1)) AllocConsole();
+        try
+        {
+            Console.SetOut(new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true });
+            Console.SetError(new StreamWriter(Console.OpenStandardError()) { AutoFlush = true });
+        }
+        catch { /* no usable console; the log file still records everything */ }
+    }
+
     private static int RunConsole(string[] args)
     {
+        EnsureConsole();
         Util.ConsoleMirror.Install();
         var opts = Options.Parse(args);
 
@@ -114,6 +144,7 @@ internal static class Program
             FragMs = opts.FragMs,
             NoCursor = opts.NoCursor,
             CompatibilityCapture = opts.CompatCapture,
+            ViewKey = opts.NoKey ? null : SessionConfig.NewViewKey(),
         };
 
         var session = new StreamSession(config);
@@ -158,6 +189,7 @@ internal static class Program
         public string Audio = "";
         public string Name = "";
         public bool NoAudio = false;
+        public bool NoKey = false;
         public bool CompatCapture = false;
         public int FragMs = 50; // batched fragments: Firefox presents ~25fps with per-frame appends; --frag-ms 0 = per-frame
 
@@ -183,14 +215,16 @@ internal static class Program
                     case "--audio": o.Audio = Next(); break;
                     case "--name": o.Name = Next(); break;
                     case "--no-audio": o.NoAudio = true; break;
+                    case "--no-key": o.NoKey = true; break;
                     case "--compat-capture": o.CompatCapture = true; break;
                     case "--frag-ms": o.FragMs = int.Parse(Next()); break;
                     case "--help":
                         Console.WriteLine("StreamHost                     -> app window");
-                        Console.WriteLine("StreamHost [--monitor N | --window \"title/exe\"] [--fps 30|60] [--bitrate kbps] [--port N]");
+                        Console.WriteLine("StreamHost [--monitor N | --window \"title/exe\"] [--fps 30|60] [--bitrate kbps, 0=auto] [--port N]");
                         Console.WriteLine("           [--height 1080] [--encoder auto|h264_nvenc|h264_amf|h264_qsv|libx264]");
                         Console.WriteLine("           [--name \"shown to viewers\"] [--audio \"app\"] [--no-audio] [--no-cursor] [--frag-ms N]");
-                        Console.WriteLine("           [--list-monitors] [--list-windows]");
+                        Console.WriteLine("           [--no-key (viewer links work without ?k=)] [--list-monitors] [--list-windows]");
+                        Console.WriteLine("StreamHost --setup-port N [--setup-user \"DOMAIN\\user\"]  -> reserve URL + firewall (admin)");
                         Environment.Exit(0);
                         break;
                     default:

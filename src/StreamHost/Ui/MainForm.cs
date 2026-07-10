@@ -38,7 +38,23 @@ public sealed class MainForm : Form
         new("1080p · 60 fps  (~12 Mbps)", 1080, 60, 12000),
         new("1440p · 30 fps  (~12 Mbps)", 1440, 30, 12000),
         new("1440p · 60 fps  (~18 Mbps)", 1440, 60, 18000),
-        new("Native · 60 fps (~12 Mbps)", 0, 60, 12000),
+        // Kbps 0 = auto: the session picks the bitrate from the real output
+        // resolution (native on a 1440p monitor needs 18 Mbps, not 1080p's 12).
+        new("Native · 60 fps  (auto bitrate)", 0, 60, 0),
+    ];
+
+    private sealed record EncoderChoice(string Label, string Value)
+    {
+        public override string ToString() => Label;
+    }
+
+    private static readonly EncoderChoice[] Encoders =
+    [
+        new("Auto (recommended)", "auto"),
+        new("NVIDIA (NVENC)", "h264_nvenc"),
+        new("AMD (AMF)", "h264_amf"),
+        new("Intel (QSV)", "h264_qsv"),
+        new("CPU (x264)", "libx264"),
     ];
 
     private static readonly int DefaultPresetIndex =
@@ -56,6 +72,7 @@ public sealed class MainForm : Form
         public string AudioSource { get; set; } = "window"; // "none" | "window" | process name
         public int Port { get; set; } = 8093;
         public string StreamName { get; set; } = ""; // shown to viewers; empty = machine name
+        public string Encoder { get; set; } = "auto";
     }
 
     private static readonly string SettingsPath = Path.Combine(
@@ -65,16 +82,18 @@ public sealed class MainForm : Form
     private readonly RadioButton _rbMonitor = new() { Text = "Whole monitor", AutoSize = true };
     private readonly ComboBox _windowCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 330, FlatStyle = FlatStyle.Flat };
     private readonly ComboBox _monitorCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 330, FlatStyle = FlatStyle.Flat };
-    private readonly Button _refreshButton = new() { Text = "↻", Width = 34 };
     private readonly ComboBox _presetCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 210, FlatStyle = FlatStyle.Flat };
+    private readonly ComboBox _encoderCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 170, FlatStyle = FlatStyle.Flat };
     private readonly ComboBox _audioCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 230, FlatStyle = FlatStyle.Flat };
     private readonly TextBox _nameInput = new() { Width = 150, MaxLength = 32, BorderStyle = BorderStyle.FixedSingle, Text = Environment.MachineName };
     private readonly Button _watchButton = new() { Text = "Watch streams", Width = 118, Height = 38 };
     private readonly Button _copyLogButton = new() { Text = "Copy log", Width = 82, Height = 24, Anchor = AnchorStyles.Top | AnchorStyles.Right };
+    private readonly Button _bundleButton = new() { Text = "Copy support bundle", Width = 136, Height = 24, Anchor = AnchorStyles.Top | AnchorStyles.Right };
+    private readonly Button _fixPortButton = new() { Text = "Fix access", Width = 86, Height = 24, Visible = false, Anchor = AnchorStyles.Top | AnchorStyles.Right };
     private readonly NumericUpDown _portInput = new() { Minimum = 1024, Maximum = 65535, Value = 8093, Width = 80 };
     private readonly Button _startButton = new() { Text = "▶  Start streaming", Width = 160, Height = 38 };
     private readonly Button _copyButton = new() { Text = "Copy link", Width = 92, Height = 38 };
-    private readonly Button _gridButton = new() { Text = "Copy grid link", Width = 108, Height = 38 };
+    private readonly Button _switchButton = new() { Text = "Switch source", Width = 112, Height = 38 };
     private readonly TextBox _linkBox = new() { ReadOnly = true, Width = 260, TextAlign = HorizontalAlignment.Center, BorderStyle = BorderStyle.FixedSingle };
     private readonly Label _statusLabel = new() { Text = "Not streaming.", AutoSize = true };
     private readonly TextBox _logBox = new()
@@ -92,6 +111,9 @@ public sealed class MainForm : Form
     private int _livePort; // pinned while streaming so link/copy ignore edits to the port box
     private bool _retriedCpu;       // guards the one-shot GPU→CPU encoder fallback
     private bool _pendingCpuRetry;  // a fallback restart is scheduled; cancelled if the user stops
+    private bool _stopping;               // RequestStop sent; waiting for the session's Stopped event
+    private SessionConfig? _lastConfig;   // last launched config, reused for the fix-port restart
+    private SessionConfig? _pendingSwitch; // queued source switch, launched when Stopped fires
 
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
@@ -99,26 +121,24 @@ public sealed class MainForm : Form
     public MainForm()
     {
         Text = "StreamHost";
-        MinimumSize = new Size(660, 540);
-        Size = new Size(680, 580);
+        MinimumSize = new Size(680, 570);
+        Size = new Size(700, 612);
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = Bg;
         ForeColor = Fg;
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { Icon = SystemIcons.Application; }
 
         var sourceGroup = MakeGroup("What to share", 112);
-        var sourceGrid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 2 };
+        var sourceGrid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2 };
         sourceGrid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         sourceGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        sourceGrid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         sourceGrid.Controls.Add(_rbWindow, 0, 0);
         sourceGrid.Controls.Add(_windowCombo, 1, 0);
-        sourceGrid.Controls.Add(_refreshButton, 2, 0);
         sourceGrid.Controls.Add(_rbMonitor, 0, 1);
         sourceGrid.Controls.Add(_monitorCombo, 1, 1);
         sourceGroup.Controls.Add(sourceGrid);
 
-        var settingsGroup = MakeGroup("Quality & options", 96);
+        var settingsGroup = MakeGroup("Quality & options", 128);
         var settingsFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = true };
         settingsFlow.Controls.Add(new Label { Text = "Preset:", AutoSize = true, Margin = new Padding(0, 9, 4, 0), ForeColor = Dim });
         settingsFlow.Controls.Add(_presetCombo);
@@ -130,25 +150,34 @@ public sealed class MainForm : Form
         settingsFlow.Controls.Add(new Label { Text = "Name:", AutoSize = true, Margin = new Padding(16, 9, 4, 0), ForeColor = Dim });
         settingsFlow.Controls.Add(_nameInput);
         _nameInput.Margin = new Padding(0, 6, 0, 0);
+        settingsFlow.SetFlowBreak(_nameInput, true);
+        settingsFlow.Controls.Add(new Label { Text = "Encoder:", AutoSize = true, Margin = new Padding(0, 9, 4, 0), ForeColor = Dim });
+        settingsFlow.Controls.Add(_encoderCombo);
         settingsGroup.Controls.Add(settingsFlow);
 
         var actionPanel = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 50, Padding = new Padding(8, 5, 0, 0), BackColor = Bg };
         actionPanel.Controls.Add(_startButton);
+        actionPanel.Controls.Add(_switchButton);
         actionPanel.Controls.Add(_copyButton);
-        actionPanel.Controls.Add(_gridButton);
         actionPanel.Controls.Add(_watchButton);
         actionPanel.Controls.Add(_linkBox);
         _linkBox.Margin = new Padding(10, 9, 0, 0);
         _linkBox.Width = 180;
 
-        // TableLayout keeps Copy log visible regardless of window size / DPI scaling
-        // (the old manual X-position put it off the right edge for everyone).
-        var statusPanel = new TableLayoutPanel { Dock = DockStyle.Top, Height = 32, BackColor = Bg, ColumnCount = 2, Padding = new Padding(12, 4, 8, 0) };
+        // TableLayout keeps the right-side buttons visible regardless of window
+        // size / DPI scaling (manual X-positions drifted off the edge).
+        var statusPanel = new TableLayoutPanel { Dock = DockStyle.Top, Height = 32, BackColor = Bg, ColumnCount = 4, Padding = new Padding(12, 4, 8, 0) };
         statusPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         statusPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        statusPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        statusPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         statusPanel.Controls.Add(_statusLabel, 0, 0);
-        statusPanel.Controls.Add(_copyLogButton, 1, 0);
+        statusPanel.Controls.Add(_fixPortButton, 1, 0);
+        statusPanel.Controls.Add(_bundleButton, 2, 0);
+        statusPanel.Controls.Add(_copyLogButton, 3, 0);
         _statusLabel.Anchor = AnchorStyles.Left;
+        _fixPortButton.Anchor = AnchorStyles.Right;
+        _bundleButton.Anchor = AnchorStyles.Right;
         _copyLogButton.Anchor = AnchorStyles.Right;
         _statusLabel.ForeColor = Dim;
 
@@ -163,6 +192,8 @@ public sealed class MainForm : Form
 
         _presetCombo.Items.AddRange(Presets);
         _presetCombo.SelectedIndex = DefaultPresetIndex;
+        _encoderCombo.Items.AddRange(Encoders);
+        _encoderCombo.SelectedIndex = 0;
 
         ApplyDarkTheme(this);
         _startButton.BackColor = AccentDark;
@@ -177,12 +208,20 @@ public sealed class MainForm : Form
             try { Clipboard.SetText(_logBox.Text.Length > 0 ? _logBox.Text : "(log empty)"); AppendLog("Log copied to clipboard."); }
             catch (Exception ex) { AppendLog($"Clipboard failed: {ex.Message}"); }
         };
-        _refreshButton.Click += (_, _) => PopulateSources();
-        _windowCombo.DropDown += (_, _) => PopulateWindows(); // fresh list every open
-        _startButton.Click += (_, _) => { if (_session is null) StartStream(); else StopStream(); };
+        _windowCombo.DropDown += (_, _) => PopulateWindows();   // fresh list every open
+        _monitorCombo.DropDown += (_, _) => PopulateMonitors(); // monitors change too (dock/undock)
+        _rbWindow.CheckedChanged += (_, _) => UpdateAudioModeLabel();
+        _startButton.Click += (_, _) =>
+        {
+            // Clicking during a scheduled CPU retry cancels the retry.
+            if (_pendingCpuRetry) { _pendingCpuRetry = false; OnSessionStopped(null); return; }
+            if (_session is null) StartStream(); else StopStream();
+        };
+        _switchButton.Click += (_, _) => SwitchSource();
         _copyButton.Click += (_, _) => CopyLink(BuildUrl(""));
-        _gridButton.Click += (_, _) => CopyLink(BuildUrl("grid"));
         _watchButton.Click += (_, _) => OpenWatchWindow();
+        _bundleButton.Click += (_, _) => CopySupportBundle();
+        _fixPortButton.Click += (_, _) => FixPortAccess();
         _portInput.ValueChanged += (_, _) => UpdateLinkBox();
         _statsTimer.Tick += (_, _) => UpdateStatus();
 
@@ -295,11 +334,32 @@ public sealed class MainForm : Form
     private void PopulateSources()
     {
         PopulateWindows();
+        PopulateMonitors();
+    }
+
+    private void PopulateMonitors()
+    {
+        int keep = _monitorCombo.SelectedIndex;
         _monitors = MonitorEnumerator.GetMonitors();
+        _monitorCombo.BeginUpdate();
         _monitorCombo.Items.Clear();
         foreach (var m in _monitors)
             _monitorCombo.Items.Add($"{m.DeviceName}  {m.Width}x{m.Height}{(m.IsPrimary ? "  (primary)" : "")}");
-        if (_monitorCombo.Items.Count > 0) _monitorCombo.SelectedIndex = 0;
+        _monitorCombo.EndUpdate();
+        if (_monitorCombo.Items.Count > 0)
+            _monitorCombo.SelectedIndex = keep >= 0 && keep < _monitorCombo.Items.Count ? keep : 0;
+    }
+
+    /// <summary>"Captured window's audio" is a trap during a monitor share (it
+    /// resolves to silence) — relabel it so people pick an actual app instead.</summary>
+    private void UpdateAudioModeLabel()
+    {
+        if (_audioCombo.Items.Count < 2) return;
+        int keep = _audioCombo.SelectedIndex;
+        _audioCombo.Items[1] = _rbWindow.Checked
+            ? "Captured window's audio"
+            : "No audio (monitor share: pick an app below)";
+        if (keep >= 0) _audioCombo.SelectedIndex = keep;
     }
 
     private void PopulateWindows()
@@ -333,6 +393,7 @@ public sealed class MainForm : Form
             _audioCombo.Items.Add($"{w.ProcessName} — {Truncate(w.Title, 40)}");
         _audioCombo.EndUpdate();
         SelectAudioByKey(keepAudio ?? "window");
+        UpdateAudioModeLabel();
     }
 
     /// <summary>"none", "window", or a process name.</summary>
@@ -354,8 +415,22 @@ public sealed class MainForm : Form
 
     private void StartStream()
     {
+        var config = BuildConfigFromUi((int)_portInput.Value, SessionConfig.NewViewKey());
+        if (config is null) return;
+
+        if (config.Port != 8093)
+            AppendLog("Note: setup.bat / Fix access configure one port at a time — other ports need their own run.");
+
+        _retriedCpu = false;
+        SaveSettings();
+        LaunchSession(config);
+    }
+
+    /// <summary>Reads the whole UI into a SessionConfig, or null (with a log line)
+    /// when no source is selected. Shared by Start, Switch source, and restarts.</summary>
+    private SessionConfig? BuildConfigFromUi(int port, string? viewKey)
+    {
         var preset = (Preset)_presetCombo.SelectedItem!;
-        SessionConfig config;
 
         // Resolve the audio source: none / follow captured window / a specific app.
         // "Captured window's audio" during a monitor share resolves to no audio.
@@ -373,46 +448,39 @@ public sealed class MainForm : Form
             else AppendLog($"[audio] '{audioKey}' is not running — streaming without audio");
         }
 
+        IntPtr windowHandle = IntPtr.Zero, monitorHandle = IntPtr.Zero;
+        string sourceName;
         if (_rbWindow.Checked)
         {
-            if (_windowCombo.SelectedIndex < 0) { AppendLog("No window selected."); return; }
+            if (_windowCombo.SelectedIndex < 0) { AppendLog("No window selected."); return null; }
             var w = _windows[_windowCombo.SelectedIndex];
-            config = new SessionConfig
-            {
-                WindowHandle = w.Handle,
-                SourceName = $"window '{w.Title}' [{w.ProcessName}]",
-                StreamName = _nameInput.Text.Trim(),
-                AudioPid = audioPid,
-                Fps = preset.Fps,
-                BitrateKbps = preset.Kbps,
-                OutHeight = preset.Height,
-                Port = (int)_portInput.Value,
-            };
+            windowHandle = w.Handle;
+            sourceName = $"window '{w.Title}' [{w.ProcessName}]";
         }
         else
         {
-            if (_monitorCombo.SelectedIndex < 0) { AppendLog("No monitor selected."); return; }
+            if (_monitorCombo.SelectedIndex < 0) { AppendLog("No monitor selected."); return null; }
             var m = _monitors[_monitorCombo.SelectedIndex];
-            config = new SessionConfig
-            {
-                MonitorHandle = m.Handle,
-                SourceName = m.DeviceName,
-                StreamName = _nameInput.Text.Trim(),
-                AudioPid = audioPid,
-                Fps = preset.Fps,
-                BitrateKbps = preset.Kbps,
-                OutHeight = preset.Height,
-                Port = (int)_portInput.Value,
-            };
+            monitorHandle = m.Handle;
+            sourceName = m.DeviceName;
         }
 
-        if (config.Port != 8093)
-            AppendLog("Note: setup.bat opened port 8093 — other ports need their own urlacl/firewall entries.");
-
-        _retriedCpu = false;
-        SaveSettings();
-        if (!LaunchSession(config)) return;
+        return new SessionConfig
+        {
+            WindowHandle = windowHandle,
+            MonitorHandle = monitorHandle,
+            SourceName = sourceName,
+            StreamName = _nameInput.Text.Trim(),
+            AudioPid = audioPid,
+            Fps = preset.Fps,
+            BitrateKbps = preset.Kbps,
+            OutHeight = preset.Height,
+            Port = port,
+            Encoder = ((EncoderChoice)_encoderCombo.SelectedItem!).Value,
+            ViewKey = viewKey,
+        };
     }
+
 
     /// <summary>Starts a session and wires its Stopped event, including the automatic
     /// CPU-encoder retry when a GPU encoder stalls. Returns false if it couldn't start.</summary>
@@ -430,6 +498,9 @@ public sealed class MainForm : Form
             return false;
         }
 
+        // Stopped fires only after the session thread finished real teardown
+        // (server disposed, port released), so everything below can restart
+        // immediately without racing the old session for the port.
         session.Stopped += reason =>
         {
             try
@@ -437,15 +508,27 @@ public sealed class MainForm : Form
                 BeginInvoke(() =>
                 {
                     if (!ReferenceEquals(_session, session)) return; // superseded by a newer session
+                    _session = null;
+                    bool userRequested = _stopping;
+                    _stopping = false;
+
+                    // A queued source switch or fix-port restart takes priority.
+                    if (_pendingSwitch is { } next)
+                    {
+                        _pendingSwitch = null;
+                        LaunchSession(next);
+                        return;
+                    }
+
                     // GPU encoder stalled or died → restart once on the CPU encoder.
                     bool encoderFailed = reason == "encoder-stall" || reason.StartsWith("encoder exited");
-                    if (encoderFailed && !_retriedCpu && config.Encoder != "libx264")
+                    if (!userRequested && encoderFailed && !_retriedCpu && config.Encoder != "libx264")
                     {
                         _retriedCpu = true;
                         _pendingCpuRetry = true;
                         AppendLog("GPU encoder produced no video — restarting with the CPU encoder (libx264)…");
                         var fallback = config with { Encoder = "libx264" };
-                        var t = new System.Windows.Forms.Timer { Interval = 800 }; // let the port release
+                        var t = new System.Windows.Forms.Timer { Interval = 250 };
                         t.Tick += (_, _) =>
                         {
                             t.Stop(); t.Dispose();
@@ -454,12 +537,13 @@ public sealed class MainForm : Form
                         t.Start();
                         return;
                     }
-                    OnSessionStopped(reason);
+                    OnSessionStopped(userRequested ? null : reason);
                 });
             }
             catch { }
         };
         _session = session;
+        _lastConfig = config;
         session.Start();
 
         _livePort = config.Port;
@@ -470,25 +554,53 @@ public sealed class MainForm : Form
         return true;
     }
 
+    /// <summary>Request a stop and wait for the session's Stopped event; the UI
+    /// shows "Stopping…" until teardown really finished instead of pretending
+    /// the stream is gone while the old session still owns the port.</summary>
     private void StopStream()
     {
+        if (_session is null || _stopping) return;
+        _pendingCpuRetry = false;
+        _pendingSwitch = null;
+        _stopping = true;
         _statsTimer.Stop();
-        _pendingCpuRetry = false; // cancel any scheduled CPU-encoder fallback
-        var session = _session;
-        _session = null; // detach first so the Stopped event's identity check fails
-        session?.Stop();
-        OnSessionStopped(null);
+        _startButton.Text = "…  Stopping";
+        _statusLabel.Text = "Stopping…";
+        _statusLabel.ForeColor = Color.Goldenrod;
+        _session.RequestStop();
+    }
+
+    /// <summary>Restart with whatever the UI currently selects, keeping the port
+    /// and viewer key, so viewer links survive and pages auto-reconnect after a
+    /// short blip. Under the hood it is a clean stop + start.</summary>
+    private void SwitchSource()
+    {
+        if (_session is null) { StartStream(); return; }
+        if (_stopping) return;
+        var config = BuildConfigFromUi(_livePort, _session.ViewKey);
+        if (config is null) return;
+        _retriedCpu = false;
+        _pendingSwitch = config;
+        _stopping = true;
+        _statsTimer.Stop();
+        _statusLabel.Text = "Switching source…";
+        _statusLabel.ForeColor = Color.Goldenrod;
+        AppendLog($"Switching to {config.SourceName} — viewers reconnect automatically.");
+        SaveSettings();
+        _session.RequestStop();
     }
 
     private void OnSessionStopped(string? reason)
     {
         _statsTimer.Stop();
         _session = null;
+        _stopping = false;
         _startButton.Text = "▶  Start streaming";
         _startButton.BackColor = AccentDark;
         Text = "StreamHost";
         _tray.Text = "StreamHost";
         _livePort = 0;
+        _fixPortButton.Visible = false;
         UpdateLinkBox();
         _statusLabel.Text = reason is null or "stopped" ? "Not streaming." : $"Stopped: {reason}";
         _statusLabel.ForeColor = reason is null or "stopped" ? Dim : Red;
@@ -497,7 +609,7 @@ public sealed class MainForm : Form
     private void UpdateStatus()
     {
         var b = _session?.Broadcaster;
-        if (b is null) return;
+        if (b is null || _stopping) return;
         if (b.State == "starting")
         {
             _statusLabel.ForeColor = Color.Goldenrod;
@@ -506,17 +618,30 @@ public sealed class MainForm : Form
         }
         if (_session!.LocalOnly)
         {
+            _fixPortButton.Visible = true;
             _statusLabel.ForeColor = Color.Goldenrod;
-            _statusLabel.Text = $"LIVE, THIS PC ONLY — run setup.bat {_livePort} as admin, then restart the stream";
+            _statusLabel.Text = $"LIVE, THIS PC ONLY — click Fix access to let viewers reach port {_livePort}";
         }
         else
         {
+            _fixPortButton.Visible = false;
             _statusLabel.ForeColor = Green;
-            _statusLabel.Text = $"LIVE — {_session.Description}   viewers: {b.ViewerCount}   source: {b.SourceFps} fps (dup {b.DupPercent}%)";
+            _statusLabel.Text = $"LIVE — {_session.Description} · {EncoderLabel(_session.ActiveEncoder)}   viewers: {b.ViewerCount}   source: {b.SourceFps} fps (dup {b.DupPercent}%)";
         }
         Text = $"StreamHost — LIVE ({b.ViewerCount} watching)";
         _tray.Text = TruncateTray($"StreamHost — LIVE, {b.ViewerCount} watching");
     }
+
+    /// <summary>What's actually encoding right now, in GPU/CPU terms.</summary>
+    private static string EncoderLabel(string? encoder) => encoder switch
+    {
+        "h264_nvenc" => "GPU (NVENC)",
+        "h264_amf" => "GPU (AMF)",
+        "h264_qsv" => "GPU (QSV)",
+        "libx264" => "CPU (x264)",
+        null => "starting",
+        _ => encoder,
+    };
 
     private static string TruncateTray(string s) => s.Length <= 63 ? s : s[..63];
 
@@ -527,7 +652,10 @@ public sealed class MainForm : Form
         string host = _session?.LocalOnly == true ? "localhost"
             : addrs.Count > 0 ? addrs[0] : "localhost";
         int port = _livePort > 0 ? _livePort : (int)_portInput.Value;
-        return $"http://{host}:{port}/{pathSuffix}";
+        string url = $"http://{host}:{port}/{pathSuffix}";
+        if (pathSuffix.Length == 0 && _session?.ViewKey is { } key)
+            url += $"?k={key}";
+        return url;
     }
 
     private void UpdateLinkBox() => _linkBox.Text = BuildUrl("");
@@ -541,7 +669,7 @@ public sealed class MainForm : Form
             _watchForm.Activate();
             return;
         }
-        _watchForm = new WatchForm();
+        _watchForm = new WatchForm((int)_portInput.Value);
         _watchForm.Show();
     }
 
@@ -550,12 +678,156 @@ public sealed class MainForm : Form
         try
         {
             Clipboard.SetText(url);
-            AppendLog($"Copied: {url}" + (url.Contains("://100.") ? "  (Tailscale)" : ""));
+            AppendLog($"Copied: {RedactKey(url)}" + (url.Contains("://100.") ? "  (Tailscale)" : ""));
         }
         catch (Exception ex)
         {
-            AppendLog($"Clipboard failed ({ex.Message}) — link: {url}");
+            AppendLog($"Clipboard failed ({ex.Message}) — link: {RedactKey(url)}");
         }
+    }
+
+    private static string RedactKey(string text) =>
+        System.Text.RegularExpressions.Regex.Replace(text, @"\?k=\w+", "?k=[key]");
+
+    /// <summary>Relaunches this exe elevated to reserve the URL and open the
+    /// firewall for the current port (same steps as setup.bat), then restarts
+    /// the stream so the new binding takes effect. One UAC prompt, no file hunting.</summary>
+    private void FixPortAccess()
+    {
+        int port = _livePort > 0 ? _livePort : (int)_portInput.Value;
+        AppendLog($"Asking for administrator approval to configure port {port}…");
+        var psi = new System.Diagnostics.ProcessStartInfo(Application.ExecutablePath,
+            $"--setup-port {port} --setup-user \"{Environment.UserDomainName}\\{Environment.UserName}\"")
+        {
+            UseShellExecute = true,
+            Verb = "runas",
+        };
+        new Thread(() =>
+        {
+            int code;
+            try
+            {
+                using var p = System.Diagnostics.Process.Start(psi);
+                code = p is not null && p.WaitForExit(60000) ? p.ExitCode : -1;
+            }
+            catch (System.ComponentModel.Win32Exception) // UAC declined
+            {
+                code = -2;
+            }
+            catch
+            {
+                code = -1;
+            }
+            try
+            {
+                BeginInvoke(() =>
+                {
+                    if (code == 0)
+                    {
+                        AppendLog($"Port {port} configured.");
+                        if (_session is not null && _lastConfig is not null && !_stopping)
+                        {
+                            AppendLog("Restarting the stream so the new access takes effect…");
+                            _pendingSwitch = _lastConfig;
+                            _stopping = true;
+                            _statsTimer.Stop();
+                            _statusLabel.Text = "Restarting…";
+                            _statusLabel.ForeColor = Color.Goldenrod;
+                            _session.RequestStop();
+                        }
+                    }
+                    else if (code == -2)
+                        AppendLog("Administrator approval was declined — viewers on other machines stay blocked.");
+                    else
+                        AppendLog($"Port setup failed (code {code}). Fallback: run setup.bat {port} as administrator.");
+                });
+            }
+            catch { }
+        })
+        { IsBackground = true, Name = "fix-port" }.Start();
+    }
+
+    /// <summary>Everything needed to debug a report, one clipboard copy:
+    /// version, OS, GPUs, ffmpeg, encoder cache, session state, settings, log tail.</summary>
+    private void CopySupportBundle()
+    {
+        try
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine($"StreamHost {AppVersion()}");
+            sb.AppendLine($"Windows:  {Environment.OSVersion.VersionString}");
+            sb.AppendLine($"GPUs:     {string.Join("; ", GpuAdapters())}");
+            sb.AppendLine($"ffmpeg:   {FfmpegVersionLine()}");
+            sb.AppendLine($"enc cache: {ReadSmallFile(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "StreamHost", "encoder.cache"))}");
+            sb.AppendLine(_session is { } s
+                ? $"session:  {s.Description} via {s.ActiveEncoder}, state {s.Broadcaster?.State}, viewers {s.Broadcaster?.ViewerCount}, localOnly {s.LocalOnly}"
+                : "session:  not streaming");
+            sb.AppendLine($"settings: {ReadSmallFile(SettingsPath)}");
+            sb.AppendLine("---- last 200 log lines ----");
+            string[] lines = _logBox.Lines;
+            foreach (string line in lines.Skip(Math.Max(0, lines.Length - 200)))
+                sb.AppendLine(RedactKey(line));
+            Clipboard.SetText(sb.ToString());
+            AppendLog("Support bundle copied — paste it into a bug report.");
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"Support bundle failed: {ex.Message}");
+        }
+    }
+
+    private static string AppVersion() =>
+        System.Reflection.Assembly.GetExecutingAssembly()
+            .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+            is [System.Reflection.AssemblyInformationalVersionAttribute a, ..] ? a.InformationalVersion : "dev";
+
+    private static List<string> GpuAdapters()
+    {
+        var list = new List<string>();
+        try
+        {
+            using var factory = Vortice.DXGI.DXGI.CreateDXGIFactory1<Vortice.DXGI.IDXGIFactory1>();
+            for (uint i = 0; factory.EnumAdapters1(i, out Vortice.DXGI.IDXGIAdapter1? adapter).Success; i++)
+            {
+                using (adapter)
+                {
+                    var d = adapter!.Description1;
+                    if ((d.Flags & Vortice.DXGI.AdapterFlags.Software) == 0)
+                        list.Add($"{d.Description} (vendor 0x{d.VendorId:X4})");
+                }
+            }
+        }
+        catch { }
+        if (list.Count == 0) list.Add("unknown");
+        return list;
+    }
+
+    private static string FfmpegVersionLine()
+    {
+        try
+        {
+            using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+                Encode.FfmpegEncoder.FfmpegPath, "-version")
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                CreateNoWindow = true,
+            });
+            if (p is null) return "not found";
+            string? line = p.StandardOutput.ReadLine();
+            p.WaitForExit(3000);
+            return line ?? "no output";
+        }
+        catch (Exception ex)
+        {
+            return $"not runnable ({ex.Message})";
+        }
+    }
+
+    private static string ReadSmallFile(string path)
+    {
+        try { return File.Exists(path) ? File.ReadAllText(path).Replace("\r", "").Replace('\n', ' ') : "(none)"; }
+        catch { return "(unreadable)"; }
     }
 
     // ---- settings ---------------------------------------------------------
@@ -582,6 +854,9 @@ public sealed class MainForm : Form
             SelectAudioByKey(s.AudioSource);
             if (s.Port is >= 1024 and <= 65535) _portInput.Value = s.Port;
             if (!string.IsNullOrWhiteSpace(s.StreamName)) _nameInput.Text = s.StreamName;
+            int encIdx = Array.FindIndex(Encoders, e => e.Value == s.Encoder);
+            _encoderCombo.SelectedIndex = encIdx >= 0 ? encIdx : 0;
+            UpdateAudioModeLabel();
         }
         catch { /* corrupted settings are not worth crashing over */ }
     }
@@ -601,6 +876,7 @@ public sealed class MainForm : Form
                 AudioSource = SelectedAudioKey(),
                 Port = (int)_portInput.Value,
                 StreamName = _nameInput.Text.Trim(),
+                Encoder = ((EncoderChoice)_encoderCombo.SelectedItem!).Value,
             };
             Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!);
             File.WriteAllText(SettingsPath, JsonSerializer.Serialize(s, new JsonSerializerOptions { WriteIndented = true }));

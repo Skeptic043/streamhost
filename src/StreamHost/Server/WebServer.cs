@@ -1,16 +1,20 @@
 using System.Net;
+using System.Text.Json;
 
 namespace StreamHost.Server;
 
 /// <summary>
 /// Minimal HttpListener server: serves the viewer page from wwwroot and upgrades
 /// /ws to a WebSocket handled by the Broadcaster. No ASP.NET dependency.
+/// The viewer page and the WebSocket require the per-session key (?k=) when one
+/// is set; /api/stats and static assets stay open so the grid can probe.
 /// </summary>
 public sealed class WebServer : IDisposable
 {
     private readonly HttpListener _listener;
     private readonly Broadcaster _broadcaster;
     private readonly string _wwwroot;
+    private readonly string? _viewKey;
     public string BoundPrefix { get; }
 
     private static readonly Dictionary<string, string> ContentTypes = new(StringComparer.OrdinalIgnoreCase)
@@ -22,9 +26,10 @@ public sealed class WebServer : IDisposable
         [".svg"] = "image/svg+xml",
     };
 
-    public WebServer(int port, Broadcaster broadcaster)
+    public WebServer(int port, Broadcaster broadcaster, string? viewKey = null)
     {
         _broadcaster = broadcaster;
+        _viewKey = viewKey;
         _wwwroot = Path.Combine(AppContext.BaseDirectory, "wwwroot");
 
         // A failed Start() poisons the HttpListener, so each attempt gets a fresh one.
@@ -75,9 +80,16 @@ public sealed class WebServer : IDisposable
         try
         {
             string path = context.Request.Url?.AbsolutePath ?? "/";
+            bool keyOk = _viewKey is null || context.Request.QueryString["k"] == _viewKey;
 
             if (path == "/ws")
             {
+                if (!keyOk)
+                {
+                    context.Response.StatusCode = 403;
+                    context.Response.Close();
+                    return;
+                }
                 if (!context.Request.IsWebSocketRequest)
                 {
                     context.Response.StatusCode = 400;
@@ -93,14 +105,36 @@ public sealed class WebServer : IDisposable
             {
                 // CORS so the grid page (served by a friend's host) can probe us
                 context.Response.AddHeader("Access-Control-Allow-Origin", "*");
-                string name = _broadcaster.StreamName.Replace("\\", "\\\\").Replace("\"", "\\\"");
-                await WriteResponseAsync(context, 200, "application/json",
-                    $"{{\"name\":\"{name}\",\"state\":\"{_broadcaster.State}\",\"viewers\":{_broadcaster.ViewerCount},\"fragments\":{Interlocked.Read(ref _broadcaster.FragmentsSent)}," +
-                    $"\"sourceFps\":{_broadcaster.SourceFps},\"dupPct\":{_broadcaster.DupPercent},\"audio\":{(_broadcaster.HasAudio ? "true" : "false")}}}");
+                var stats = new Dictionary<string, object?>
+                {
+                    ["name"] = _broadcaster.StreamName,
+                    ["state"] = _broadcaster.State,
+                    ["viewers"] = _broadcaster.ViewerCount,
+                    ["fragments"] = Interlocked.Read(ref _broadcaster.FragmentsSent),
+                    ["sourceFps"] = _broadcaster.SourceFps,
+                    ["dupPct"] = _broadcaster.DupPercent,
+                    ["audio"] = _broadcaster.HasAudio,
+                };
+                // Hand the current key to trusted callers only: Tailscale peers
+                // (the tailnet requires device approval) and this machine. That is
+                // what lets the stream finder and saved grid tiles keep working
+                // after a restart rotates the key, without exposing it to the LAN.
+                if (_viewKey is not null && IsTrustedCaller(context.Request.RemoteEndPoint?.Address))
+                    stats["key"] = _viewKey;
+                await WriteResponseAsync(context, 200, "application/json", JsonSerializer.Serialize(stats));
                 return;
             }
 
-            if (path == "/") path = "/index.html";
+            if (path == "/")
+            {
+                if (!keyOk)
+                {
+                    await WriteResponseAsync(context, 403, "text/plain; charset=utf-8",
+                        "This stream needs its viewer key. Ask the streamer for the current link (it ends in ?k=...).");
+                    return;
+                }
+                path = "/index.html";
+            }
             if (path == "/grid") path = "/grid.html";
             string file = Path.GetFullPath(Path.Combine(_wwwroot, path.TrimStart('/')));
             // Trailing separator so a sibling like "wwwroot-x" can't pass the prefix check.
@@ -122,6 +156,17 @@ public sealed class WebServer : IDisposable
         {
             try { context.Response.StatusCode = 500; context.Response.Close(); } catch { }
         }
+    }
+
+    /// <summary>Tailscale CGNAT range (100.64.0.0/10) or loopback.</summary>
+    private static bool IsTrustedCaller(IPAddress? address)
+    {
+        if (address is null) return false;
+        if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
+        if (IPAddress.IsLoopback(address)) return true;
+        if (address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) return false;
+        byte[] b = address.GetAddressBytes();
+        return b[0] == 100 && b[1] >= 64 && b[1] <= 127;
     }
 
     private static async Task WriteResponseAsync(HttpListenerContext context, int status, string contentType, string body)

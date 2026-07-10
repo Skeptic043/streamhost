@@ -7,59 +7,81 @@ the audio of the application you select.
 
 SETUP (once, ~2 minutes)
 ------------------------
-1. Right-click setup.bat -> Run as administrator.
-   This reserves the stream port and adds a firewall rule limited to
-   Tailscale and private LAN address ranges.
-2. Install Tailscale (tailscale.com/download) and accept the invite you
+1. Install Tailscale (tailscale.com/download) and accept the invite you
    received by email.
+2. Double-click StreamHost.exe and Start a stream. If a friend can't
+   connect, click "Fix access" in the app: it asks Windows for
+   administrator approval once and configures the stream port for you
+   (the port is what StreamHost serves the stream on and what viewers'
+   browsers connect to). You only do this once per PC.
+   If you'd rather do it up front, or "Fix access" doesn't work for
+   some reason, right-click setup.bat -> Run as administrator instead.
+   It does the same thing: reserves the stream port and adds a firewall
+   rule limited to Tailscale and private LAN address ranges.
 
 STREAMING
 ---------
 1. Double-click StreamHost.exe.
 2. Pick your game from the list, pick a quality preset, Start streaming.
+   The encoder dropdown picks NVIDIA NVENC, AMD AMF, Intel QSV, or CPU
+   (libx264); leave it on Auto unless you have a reason to force one.
+   Live status shows which encoder is actually running, including if it
+   falls back to CPU mid-stream.
 3. Copy link -> paste it to your friends. They open it in any browser.
-   Click the video for sound; hover for volume and fullscreen.
+   Hover the video for sound and volume controls, and fullscreen.
+   The link includes a per-stream key, a new one is generated every time
+   you start a stream, so send a fresh link (or have them use "Find
+   streams" in the Watch window) after restarting.
 
 The window minimizes to the tray and keeps streaming. The app waits for
-the first captured frame before reporting the stream as live — if it
-stops with a capture error instead, use "Copy log" and send that along.
+the first captured frame before reporting the stream as live. If it
+stops with a capture error instead, use "Copy log" (or "Copy support
+bundle" for a fuller report: version, system, GPU, encoder, and recent
+log) and send that along.
 
-WATCHING MULTIPLE STREAMS — THE GRID
--------------------------------------
+WATCHING MULTIPLE STREAMS, THE GRID
+------------------------------------
 Anyone streaming also serves a grid page ("Copy grid link" in the app,
 or add "grid" to a stream link). Open it, paste each friend's stream
-link once — every live stream tiles into one tab. Reorder tiles with
-the arrow buttons; the list is remembered by your browser.
+link once, every live stream tiles into one tab. Reorder tiles with
+the arrow buttons, and switch between side-by-side and stacked layout;
+the list is remembered by your browser.
 
 TIPS
 ----
 - FULLSCREEN GAMES: share the whole monitor. Monitor shares detect
   exclusive-fullscreen games automatically and switch capture method
-  as needed (the cursor disappears from the stream in that mode).
+  as needed. The cursor is captured either way.
   Pick the game in the Audio list so the monitor share has sound.
 - The Audio dropdown chooses whose sound the stream carries: the
   captured window, any other running app, or nothing.
 - "Watch streams" in the app opens the built-in viewer (same grid as
-  the browser version, identical playback for everyone).
+  the browser version, identical playback for everyone), including a
+  "Find streams" panel that lists live streams from other StreamHost
+  machines on your Tailscale network for one-click adding.
 - Add ?stats=1 to a stream link for a diagnostics overlay.
 - Weak upload? Pick a 30 fps preset.
 - The app remembers your source/preset/audio/port between runs.
 - CUSTOM PORT (optional): setup.bat covers port 8093. For another port,
   open Command Prompt in this folder and run:  setup.bat 8094
-  (that's the same setup.bat, given the port as an argument — not a
+  (that's the same setup.bat, given the port as an argument, not a
   separate file). Then set the same port in the app. If you use
   start-stream.bat, edit the PORT line there to match.
-- Streaming at the same time as a friend is fine, whatever the ports —
+- Streaming at the same time as a friend is fine, whatever the ports;
   ports only matter per PC.
 
 IF SOMETHING BREAKS
 -------------------
 Every run writes a log file (path is printed at the top of the app's
 log panel; tray icon -> Open logs folder). "Copy log" puts the current
-session's log on the clipboard — paste that when reporting a problem.
+session's log on the clipboard, "Copy support bundle" adds version,
+system, GPU, and encoder info. Paste either when reporting a problem.
 
-- Friends' page never loads: setup.bat not run as admin, or Tailscale
-  not connected on one end.
-- Status shows "THIS PC ONLY": run setup.bat for that port, restart
-  the stream.
-- Page loads but video never starts: firewall — re-run setup.bat.
+- Stream page never loads: the port isn't open yet, or Tailscale isn't
+  connected on one end. Click "Fix access" in the app (or run setup.bat
+  as admin) and try again.
+- Status shows "THIS PC ONLY": use "Fix access" (or setup.bat) for that
+  port, restart the stream.
+- Page loads but video never starts: same as above, the port that
+  viewers' browsers connect to isn't reachable yet. Re-run "Fix access"
+  or setup.bat.

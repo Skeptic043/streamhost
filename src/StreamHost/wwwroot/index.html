@@ -156,7 +156,8 @@ function setStatus(live, text) {
 function connect() {
   cleanup();
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  // The query string carries the viewer key (?k=) — the socket needs it too.
+  ws = new WebSocket(`${proto}://${location.host}/ws${location.search}`);
   ws.binaryType = "arraybuffer";
 
   ws.onopen = () => { retryMs = 500; setStatus(false, "waiting for stream…"); };
@@ -174,7 +175,7 @@ function connect() {
     stat.bytes += ev.data.byteLength;
     lastDataAt = performance.now();
     queue.push(new Uint8Array(ev.data, 8));
-    queuedBytes += ev.data.byteLength;
+    queuedBytes += ev.data.byteLength - 8; // count the payload, matching pump()'s subtraction
     // Bounded backlog: if appends can't keep up, reconnect for a clean resync
     // instead of growing memory until the tab dies.
     if (queuedBytes > 32 * 1024 * 1024) {
@@ -235,6 +236,7 @@ function pump() {
   } catch (e) {
     if (e.name === "QuotaExceededError" && video.buffered.length) {
       queue.unshift(chunk); // retry after the remove() below finishes
+      queuedBytes += chunk.length; // restore what the dequeue above subtracted
       try { sb.remove(0, Math.max(0, video.currentTime - 5)); } catch (_) {}
     } else {
       // Anything else: burn it down and reconnect cleanly.
@@ -294,6 +296,11 @@ setInterval(() => {
   const stalled = ws && ws.readyState === 1 && lastDataAt > 0 && performance.now() - lastDataAt > 3000;
   const live = !!(ws && ws.readyState === 1 && video.readyState >= 2 && !video.paused) && !stalled;
   setStatus(live, stalled ? "stalled — no data from host…" : live ? "live" : badgeText.textContent);
+  // A half-open connection can sit "stalled" forever; after 8s force a clean
+  // reconnect instead of only changing the badge text.
+  if (ws && ws.readyState === 1 && lastDataAt > 0 && performance.now() - lastDataAt > 8000) {
+    try { ws.close(); } catch (_) {}
+  }
 
   const q = video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality() : null;
   if (q) {
