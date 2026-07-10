@@ -18,7 +18,6 @@
     background: rgba(13,15,18,.85); transition: opacity .3s; cursor: pointer;
   }
   #overlay.hidden { opacity: 0; pointer-events: none; }
-  #overlay .big { font-size: 40px; }
   #overlay .msg { color: #9aa1ab; }
   #badge {
     position: absolute; top: 10px; left: 10px; padding: 4px 10px;
@@ -59,7 +58,6 @@
     <button id="fsBtn" title="Fullscreen">&#x26F6;</button>
   </div>
   <div id="overlay">
-    <div class="big">&#9654;</div>
     <div class="msg" id="overlayMsg">connecting&hellip;</div>
   </div>
 </div>
@@ -153,11 +151,17 @@ function setStatus(live, text) {
   overlay.classList.toggle("hidden", live);
 }
 
+// The viewer key travels in ?k=. A stream restart rotates it, so a tab opened
+// before the stream (or left over from a previous one) can hold a stale key;
+// trusted callers (tailnet + loopback) get the current key from /api/stats and
+// adopt it here, so the holding page connects itself once a stream goes live.
+let viewKey = new URLSearchParams(location.search).get("k") || "";
+
 function connect() {
   cleanup();
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  // The query string carries the viewer key (?k=) — the socket needs it too.
-  ws = new WebSocket(`${proto}://${location.host}/ws${location.search}`);
+  const q = viewKey ? "?k=" + encodeURIComponent(viewKey) : "";
+  ws = new WebSocket(`${proto}://${location.host}/ws${q}`);
   ws.binaryType = "arraybuffer";
 
   ws.onopen = () => { retryMs = 500; setStatus(false, "waiting for stream…"); };
@@ -165,7 +169,7 @@ function connect() {
   ws.onmessage = (ev) => {
     if (typeof ev.data === "string") {
       hello = JSON.parse(ev.data);
-      document.title = `${hello.name} — ${hello.width}x${hello.height}@${hello.fps}`;
+      document.title = `${hello.name} (${hello.width}x${hello.height}@${hello.fps})`;
       setupMediaSource();
       return;
     }
@@ -179,7 +183,7 @@ function connect() {
     // Bounded backlog: if appends can't keep up, reconnect for a clean resync
     // instead of growing memory until the tab dies.
     if (queuedBytes > 32 * 1024 * 1024) {
-      setStatus(false, "buffer overrun — reconnecting…");
+      setStatus(false, "buffer overrun, reconnecting…");
       try { ws.close(); } catch (_) {}
       return;
     }
@@ -187,7 +191,16 @@ function connect() {
   };
 
   ws.onclose = () => {
-    setStatus(false, "reconnecting…");
+    // Distinguish "host is up but not streaming yet" from a real drop, so a tab
+    // opened before the stream starts (or holding a link between streams) shows
+    // an honest message and connects itself the moment a stream goes live.
+    fetch("/api/stats", { signal: AbortSignal.timeout(2500) })
+      .then(r => r.json())
+      .then(s => {
+        if (s.key) viewKey = s.key; // trusted caller: adopt the current key
+        setStatus(false, s.state === "idle" ? "not streaming yet" : "reconnecting…");
+      })
+      .catch(() => setStatus(false, "reconnecting…"));
     setTimeout(connect, retryMs);
     retryMs = Math.min(retryMs * 2, 5000);
   };
@@ -207,7 +220,7 @@ function setupMediaSource() {
     sb.mode = "segments";
     sb.addEventListener("updateend", pump);
     sb.addEventListener("error", () => {
-      setStatus(false, "decode error — reconnecting…");
+      setStatus(false, "decode error, reconnecting…");
       try { ws && ws.close(); } catch (_) {} // actually reconnect (onclose → retry)
     });
     pump();
@@ -295,7 +308,7 @@ setInterval(() => {
   }
   const stalled = ws && ws.readyState === 1 && lastDataAt > 0 && performance.now() - lastDataAt > 3000;
   const live = !!(ws && ws.readyState === 1 && video.readyState >= 2 && !video.paused) && !stalled;
-  setStatus(live, stalled ? "stalled — no data from host…" : live ? "live" : badgeText.textContent);
+  setStatus(live, stalled ? "stalled, no data from host…" : live ? "live" : badgeText.textContent);
   // A half-open connection can sit "stalled" forever; after 8s force a clean
   // reconnect instead of only changing the badge text.
   if (ws && ws.readyState === 1 && lastDataAt > 0 && performance.now() - lastDataAt > 8000) {

@@ -8,13 +8,18 @@ namespace StreamHost.Server;
 /// /ws to a WebSocket handled by the Broadcaster. No ASP.NET dependency.
 /// The viewer page and the WebSocket require the per-session key (?k=) when one
 /// is set; /api/stats and static assets stay open so the grid can probe.
+/// A null broadcaster runs the server in idle mode: pages are served ungated
+/// (they reveal nothing), /api/stats reports state "idle", and /ws refuses —
+/// this is the holding page shown while the app is open but not streaming, so
+/// tabs opened early connect themselves once a stream starts.
 /// </summary>
 public sealed class WebServer : IDisposable
 {
     private readonly HttpListener _listener;
-    private readonly Broadcaster _broadcaster;
+    private readonly Broadcaster? _broadcaster;
     private readonly string _wwwroot;
     private readonly string? _viewKey;
+    private readonly string _idleName;
     public string BoundPrefix { get; }
 
     private static readonly Dictionary<string, string> ContentTypes = new(StringComparer.OrdinalIgnoreCase)
@@ -26,10 +31,11 @@ public sealed class WebServer : IDisposable
         [".svg"] = "image/svg+xml",
     };
 
-    public WebServer(int port, Broadcaster broadcaster, string? viewKey = null)
+    public WebServer(int port, Broadcaster? broadcaster, string? viewKey = null, string? idleName = null)
     {
         _broadcaster = broadcaster;
         _viewKey = viewKey;
+        _idleName = string.IsNullOrWhiteSpace(idleName) ? Environment.MachineName : idleName.Trim();
         _wwwroot = Path.Combine(AppContext.BaseDirectory, "wwwroot");
 
         // A failed Start() poisons the HttpListener, so each attempt gets a fresh one.
@@ -37,7 +43,9 @@ public sealed class WebServer : IDisposable
             ?? throw new InvalidOperationException($"Could not bind port {port}");
         if (BoundPrefix.Contains("localhost"))
         {
-            Console.WriteLine($"[http] WARNING: bound to localhost only. Run setup.bat {port} as administrator, then restart the stream.");
+            Console.WriteLine(_broadcaster is null
+                ? $"[http] holding page is localhost-only for now — port {port} opens up via Fix access or setup.bat."
+                : $"[http] WARNING: bound to localhost only. Run setup.bat {port} as administrator, then restart the stream.");
         }
     }
 
@@ -84,6 +92,12 @@ public sealed class WebServer : IDisposable
 
             if (path == "/ws")
             {
+                if (_broadcaster is null) // idle: nothing to stream yet
+                {
+                    context.Response.StatusCode = 503;
+                    context.Response.Close();
+                    return;
+                }
                 if (!keyOk)
                 {
                     context.Response.StatusCode = 403;
@@ -105,16 +119,23 @@ public sealed class WebServer : IDisposable
             {
                 // CORS so the grid page (served by a friend's host) can probe us
                 context.Response.AddHeader("Access-Control-Allow-Origin", "*");
-                var stats = new Dictionary<string, object?>
-                {
-                    ["name"] = _broadcaster.StreamName,
-                    ["state"] = _broadcaster.State,
-                    ["viewers"] = _broadcaster.ViewerCount,
-                    ["fragments"] = Interlocked.Read(ref _broadcaster.FragmentsSent),
-                    ["sourceFps"] = _broadcaster.SourceFps,
-                    ["dupPct"] = _broadcaster.DupPercent,
-                    ["audio"] = _broadcaster.HasAudio,
-                };
+                var stats = _broadcaster is null
+                    ? new Dictionary<string, object?>
+                    {
+                        ["name"] = _idleName,
+                        ["state"] = "idle",
+                        ["viewers"] = 0,
+                    }
+                    : new Dictionary<string, object?>
+                    {
+                        ["name"] = _broadcaster.StreamName,
+                        ["state"] = _broadcaster.State,
+                        ["viewers"] = _broadcaster.ViewerCount,
+                        ["fragments"] = Interlocked.Read(ref _broadcaster.FragmentsSent),
+                        ["sourceFps"] = _broadcaster.SourceFps,
+                        ["dupPct"] = _broadcaster.DupPercent,
+                        ["audio"] = _broadcaster.HasAudio,
+                    };
                 // Hand the current key to trusted callers only: Tailscale peers
                 // (the tailnet requires device approval) and this machine. That is
                 // what lets the stream finder and saved grid tiles keep working

@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using StreamHost.Capture;
+using StreamHost.Server;
 using StreamHost.Util;
 
 namespace StreamHost.Ui;
@@ -16,6 +17,9 @@ public sealed class MainForm : Form
     // Rule: NEVER disable a control — WinForms paints disabled text in fixed
     // gray that's unreadable on dark backgrounds. Radios/logic decide what's
     // USED; everything stays clickable and readable.
+    // One deliberate exception (v0.15, user request): while LIVE, the pickers
+    // that only take effect through a restart are disabled — the dimming is
+    // the point, it funnels changes through the Switch source button.
     private static readonly Color Bg = Color.FromArgb(31, 33, 39);
     private static readonly Color Card = Color.FromArgb(42, 45, 53);
     private static readonly Color Border = Color.FromArgb(60, 65, 74);
@@ -25,23 +29,32 @@ public sealed class MainForm : Form
     private static readonly Color Green = Color.FromArgb(112, 186, 130);
     private static readonly Color Red = Color.FromArgb(210, 115, 115);
 
-    private sealed record Preset(string Label, int Height, int Fps, int Kbps)
+    // Presets are the TARGET output (resolution + fps); the bitrate lives in its
+    // own Low/Medium/High dropdown whose numbers repopulate from the preset and
+    // the selected source, so the streamer always sees the real Mbps before
+    // starting. Height 0 = Native: the label gets rewritten with the selected
+    // source's actual size (UpdateNativePresetLabel).
+    private sealed record Preset(string Label, int Height, int Fps)
     {
         public override string ToString() => Label;
     }
 
     private static readonly Preset[] Presets =
     [
-        new("720p · 30 fps  (~4 Mbps)", 720, 30, 4000),
-        new("720p · 60 fps  (~6 Mbps)", 720, 60, 6000),
-        new("1080p · 30 fps  (~8 Mbps)", 1080, 30, 8000),
-        new("1080p · 60 fps  (~12 Mbps)", 1080, 60, 12000),
-        new("1440p · 30 fps  (~12 Mbps)", 1440, 30, 12000),
-        new("1440p · 60 fps  (~18 Mbps)", 1440, 60, 18000),
-        // Kbps 0 = auto: the session picks the bitrate from the real output
-        // resolution (native on a 1440p monitor needs 18 Mbps, not 1080p's 12).
-        new("Native · 60 fps  (bitrate matches resolution)", 0, 60, 0),
+        new("720p · 30 fps", 720, 30),
+        new("720p · 60 fps", 720, 60),
+        new("1080p · 30 fps", 1080, 30),
+        new("1080p · 60 fps", 1080, 60),
+        new("1440p · 30 fps", 1440, 30),
+        new("1440p · 60 fps", 1440, 60),
+        new("Native · 30 fps", 0, 30),
+        new("Native · 60 fps", 0, 60),
     ];
+
+    private sealed record BitrateChoice(string Label, int Kbps, string Tier)
+    {
+        public override string ToString() => Label;
+    }
 
     private sealed record EncoderChoice(string Label, string Value)
     {
@@ -69,6 +82,7 @@ public sealed class MainForm : Form
         // used to silently shift everyone's saved choice.
         public int PresetHeight { get; set; } = 1080;
         public int PresetFps { get; set; } = 60;
+        public string BitrateTier { get; set; } = "med"; // "low" | "med" | "high"
         public string AudioSource { get; set; } = "window"; // "none" | "window" | process name
         public int Port { get; set; } = 8093;
         public string StreamName { get; set; } = ""; // shown to viewers; empty = machine name
@@ -79,16 +93,18 @@ public sealed class MainForm : Form
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "StreamHost", "settings.json");
 
     private readonly RadioButton _rbWindow = new() { Text = "Game / window", Checked = true, AutoSize = true };
-    private readonly RadioButton _rbMonitor = new() { Text = "Whole monitor", AutoSize = true };
+    private readonly RadioButton _rbMonitor = new() { Text = "Monitor", AutoSize = true };
     private readonly ComboBox _windowCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 330, FlatStyle = FlatStyle.Flat };
     private readonly ComboBox _monitorCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 330, FlatStyle = FlatStyle.Flat };
     private readonly ComboBox _presetCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 210, FlatStyle = FlatStyle.Flat };
+    private readonly ComboBox _bitrateCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 170, FlatStyle = FlatStyle.Flat };
     private readonly ComboBox _encoderCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 170, FlatStyle = FlatStyle.Flat };
     private readonly ComboBox _audioCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 230, FlatStyle = FlatStyle.Flat };
     private readonly TextBox _nameInput = new() { Width = 150, MaxLength = 32, BorderStyle = BorderStyle.FixedSingle, Text = Environment.MachineName };
     private readonly Button _watchButton = new() { Text = "Watch streams", Width = 118, Height = 38 };
-    private readonly Button _bundleButton = new() { Text = "Copy log", Width = 82, Height = 24, Anchor = AnchorStyles.Top | AnchorStyles.Right };
-    private readonly Button _fixPortButton = new() { Text = "Fix access (open port)", Width = 142, Height = 24, Visible = false, Anchor = AnchorStyles.Top | AnchorStyles.Right };
+    // 26px: at 24 the label's descenders (p/y/g) clipped against the border.
+    private readonly Button _bundleButton = new() { Text = "Copy log", Width = 82, Height = 26, Anchor = AnchorStyles.Top | AnchorStyles.Right };
+    private readonly Button _fixPortButton = new() { Text = "Fix access (open port)", Width = 142, Height = 26, Visible = false, Anchor = AnchorStyles.Top | AnchorStyles.Right };
     private readonly NumericUpDown _portInput = new() { Minimum = 1024, Maximum = 65535, Value = 8093, Width = 80 };
     private readonly Button _startButton = new() { Text = "▶  Start streaming", Width = 160, Height = 38 };
     private readonly Button _copyButton = new() { Text = "Copy link", Width = 92, Height = 38 };
@@ -113,15 +129,33 @@ public sealed class MainForm : Form
     private bool _stopping;               // RequestStop sent; waiting for the session's Stopped event
     private SessionConfig? _lastConfig;   // last launched config, reused for the fix-port restart
     private SessionConfig? _pendingSwitch; // queued source switch, launched when Stopped fires
+    private string _savedBitrateTier = "med"; // from settings, applied on the first populate
 
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT { public int Left, Top, Right, Bottom; }
+
+    // Visible window bounds without the invisible resize border, so the Native
+    // preset label shows the size capture will actually see.
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out RECT rect, int size);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+
+    // The holding page: served while the app is open but no stream is running,
+    // so links opened early (or left over from a previous stream) show
+    // "not streaming yet" and connect themselves once a stream starts.
+    private WebServer? _idleServer;
+    private CancellationTokenSource? _idleCts;
+
     public MainForm()
     {
         Text = "StreamHost";
-        MinimumSize = new Size(680, 570);
-        Size = new Size(700, 612);
+        MinimumSize = new Size(680, 600);
+        Size = new Size(760, 690);
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = Bg;
         ForeColor = Fg;
@@ -142,21 +176,24 @@ public sealed class MainForm : Form
         _audioCombo.Width = 330;
         sourceGroup.Controls.Add(sourceGrid);
 
-        var optionsRow = new TableLayoutPanel { Dock = DockStyle.Top, Height = 104, ColumnCount = 2, BackColor = Bg };
+        var optionsRow = new TableLayoutPanel { Dock = DockStyle.Top, Height = 132, ColumnCount = 2, BackColor = Bg };
         optionsRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 58));
         optionsRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 42));
 
         var qualityGroup = MakeGroup("Quality", 0);
         qualityGroup.Dock = DockStyle.Fill;
         qualityGroup.Margin = new Padding(0, 0, 3, 0);
-        var qualityGrid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2 };
+        var qualityGrid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 3 };
         qualityGrid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         qualityGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         qualityGrid.Controls.Add(new Label { Text = "Preset:", AutoSize = true, Margin = new Padding(3, 8, 3, 0), ForeColor = Dim }, 0, 0);
         qualityGrid.Controls.Add(_presetCombo, 1, 0);
-        qualityGrid.Controls.Add(new Label { Text = "Encoder:", AutoSize = true, Margin = new Padding(3, 8, 3, 0), ForeColor = Dim }, 0, 1);
-        qualityGrid.Controls.Add(_encoderCombo, 1, 1);
-        _presetCombo.Width = 250;
+        qualityGrid.Controls.Add(new Label { Text = "Bitrate:", AutoSize = true, Margin = new Padding(3, 8, 3, 0), ForeColor = Dim }, 0, 1);
+        qualityGrid.Controls.Add(_bitrateCombo, 1, 1);
+        qualityGrid.Controls.Add(new Label { Text = "Encoder:", AutoSize = true, Margin = new Padding(3, 8, 3, 0), ForeColor = Dim }, 0, 2);
+        qualityGrid.Controls.Add(_encoderCombo, 1, 2);
+        _presetCombo.Width = 250; // the Native entry carries the source resolution
+        _bitrateCombo.Width = 190;
         qualityGroup.Controls.Add(qualityGrid);
 
         var miscGroup = MakeGroup("Misc", 0);
@@ -222,7 +259,10 @@ public sealed class MainForm : Form
         // Nothing gets disabled — the selected radio decides which combo is USED.
         _windowCombo.DropDown += (_, _) => PopulateWindows();   // fresh list every open
         _monitorCombo.DropDown += (_, _) => PopulateMonitors(); // monitors change too (dock/undock)
-        _rbWindow.CheckedChanged += (_, _) => UpdateAudioModeLabel();
+        _rbWindow.CheckedChanged += (_, _) => { UpdateAudioModeLabel(); UpdateNativePresetLabel(); PopulateBitrateOptions(); };
+        _windowCombo.SelectedIndexChanged += (_, _) => { UpdateNativePresetLabel(); PopulateBitrateOptions(); };
+        _monitorCombo.SelectedIndexChanged += (_, _) => { UpdateNativePresetLabel(); PopulateBitrateOptions(); };
+        _presetCombo.SelectedIndexChanged += (_, _) => PopulateBitrateOptions();
         _startButton.Click += (_, _) =>
         {
             // Clicking during a scheduled CPU retry cancels the retry.
@@ -234,7 +274,8 @@ public sealed class MainForm : Form
         _watchButton.Click += (_, _) => OpenWatchWindow();
         _bundleButton.Click += (_, _) => CopySupportBundle();
         _fixPortButton.Click += (_, _) => FixPortAccess();
-        _portInput.ValueChanged += (_, _) => UpdateLinkBox();
+        _portInput.ValueChanged += (_, _) => { UpdateLinkBox(); RestartIdleServer(); };
+        _nameInput.Leave += (_, _) => RestartIdleServer(); // idle stats carry the name
         _statsTimer.Tick += (_, _) => UpdateStatus();
 
         ConsoleMirror.LineWritten += line =>
@@ -265,10 +306,10 @@ public sealed class MainForm : Form
                 Hide();
                 _tray.Visible = true;
                 if (_session is not null)
-                    _tray.ShowBalloonTip(1500, "StreamHost", "Still streaming — double-click to reopen.", ToolTipIcon.Info);
+                    _tray.ShowBalloonTip(1500, "StreamHost", "Still streaming. Double-click to reopen.", ToolTipIcon.Info);
             }
         };
-        FormClosing += (_, _) => { SaveSettings(); _statsTimer.Stop(); _session?.Stop(); _tray.Visible = false; };
+        FormClosing += (_, _) => { SaveSettings(); _statsTimer.Stop(); _session?.Stop(); StopIdleServer(); _tray.Visible = false; };
         // Closing the panel stops YOUR stream but leaves an open Watch window
         // alive so you can keep viewing; the app exits with its last window.
         // (The message loop is Application.Run() without a form, see Program.)
@@ -283,6 +324,9 @@ public sealed class MainForm : Form
         PopulateSources();
         LoadSettings();
         UpdateLinkBox();
+        UpdateNativePresetLabel();
+        PopulateBitrateOptions();
+        StartIdleServer();
     }
 
     protected override void OnHandleCreated(EventArgs e)
@@ -388,7 +432,7 @@ public sealed class MainForm : Form
         _windowCombo.BeginUpdate();
         _windowCombo.Items.Clear();
         foreach (var w in _windows)
-            _windowCombo.Items.Add($"{w.ProcessName} — {Truncate(w.Title, 58)}");
+            _windowCombo.Items.Add($"{w.ProcessName} - {Truncate(w.Title, 58)}");
         _windowCombo.EndUpdate();
 
         int restore = keepProcess is null ? -1
@@ -402,7 +446,7 @@ public sealed class MainForm : Form
         _audioCombo.Items.Add("No audio");
         _audioCombo.Items.Add("Captured window's audio");
         foreach (var w in _windows)
-            _audioCombo.Items.Add($"{w.ProcessName} — {Truncate(w.Title, 40)}");
+            _audioCombo.Items.Add($"{w.ProcessName} - {Truncate(w.Title, 40)}");
         _audioCombo.EndUpdate();
         SelectAudioByKey(keepAudio ?? "window");
         UpdateAudioModeLabel();
@@ -485,7 +529,7 @@ public sealed class MainForm : Form
             StreamName = _nameInput.Text.Trim(),
             AudioPid = audioPid,
             Fps = preset.Fps,
-            BitrateKbps = preset.Kbps,
+            BitrateKbps = (_bitrateCombo.SelectedItem as BitrateChoice)?.Kbps ?? 0, // 0 = session auto (Medium)
             OutHeight = preset.Height,
             Port = port,
             Encoder = ((EncoderChoice)_encoderCombo.SelectedItem!).Value,
@@ -498,6 +542,7 @@ public sealed class MainForm : Form
     /// CPU-encoder retry when a GPU encoder stalls. Returns false if it couldn't start.</summary>
     private bool LaunchSession(SessionConfig config)
     {
+        StopIdleServer(); // hand the port to the session
         StreamSession session;
         try
         {
@@ -507,6 +552,7 @@ public sealed class MainForm : Form
         {
             AppendLog($"Failed to start: {ex.Message}");
             _session = null;
+            StartIdleServer();
             return false;
         }
 
@@ -561,6 +607,7 @@ public sealed class MainForm : Form
         _livePort = config.Port;
         _startButton.Text = "■  Stop";
         _startButton.BackColor = Color.FromArgb(104, 58, 58);
+        SetLiveLock(true);
         _statsTimer.Start();
         UpdateLinkBox();
         return true;
@@ -599,17 +646,18 @@ public sealed class MainForm : Form
             MaximizeBox = false,
             ShowInTaskbar = false,
             StartPosition = FormStartPosition.CenterParent,
-            ClientSize = new Size(480, 208),
+            ClientSize = new Size(480, 244),
             BackColor = Bg,
             ForeColor = Fg,
         };
         dlg.HandleCreated += (_, _) => { int on = 1; _ = DwmSetWindowAttribute(dlg.Handle, 20, ref on, sizeof(int)); };
 
         var rbWin = new RadioButton { Text = "Game / window", AutoSize = true, Checked = _rbWindow.Checked };
-        var rbMon = new RadioButton { Text = "Whole monitor", AutoSize = true, Checked = _rbMonitor.Checked };
+        var rbMon = new RadioButton { Text = "Monitor", AutoSize = true, Checked = _rbMonitor.Checked };
         var winCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 330, FlatStyle = FlatStyle.Flat };
         var monCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 330, FlatStyle = FlatStyle.Flat };
-        var presetCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 250, FlatStyle = FlatStyle.Flat };
+        var presetCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 300, FlatStyle = FlatStyle.Flat };
+        var bitrateCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 200, FlatStyle = FlatStyle.Flat };
         var audioCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 330, FlatStyle = FlatStyle.Flat };
 
         // Mirror the main combos item-for-item so OK can copy indexes back.
@@ -621,15 +669,49 @@ public sealed class MainForm : Form
         monCombo.SelectedIndex = _monitorCombo.SelectedIndex;
         presetCombo.SelectedIndex = _presetCombo.SelectedIndex;
         audioCombo.SelectedIndex = _audioCombo.SelectedIndex;
+        // The dialog's Native entries track ITS pickers, same as the main window's.
+        void UpdateDlgNativeLabel()
+        {
+            for (int idx = 0; idx < Presets.Length && idx < presetCombo.Items.Count; idx++)
+            {
+                if (Presets[idx].Height != 0) continue;
+                int sel = presetCombo.SelectedIndex;
+                presetCombo.Items[idx] = Presets[idx] with
+                {
+                    Label = ComputeNativeLabel(Presets[idx].Fps, rbWin.Checked, winCombo.SelectedIndex, monCombo.SelectedIndex),
+                };
+                presetCombo.SelectedIndex = sel;
+            }
+        }
+        // The dialog's bitrate options track ITS pickers too.
+        void UpdateDlgBitrate()
+        {
+            if (presetCombo.SelectedItem is not Preset p) return;
+            string keep = (bitrateCombo.SelectedItem as BitrateChoice)?.Tier
+                          ?? (_bitrateCombo.SelectedItem as BitrateChoice)?.Tier ?? "med";
+            var choices = BuildBitrateChoices(p, rbWin.Checked, winCombo.SelectedIndex, monCombo.SelectedIndex);
+            bitrateCombo.BeginUpdate();
+            bitrateCombo.Items.Clear();
+            foreach (var c in choices) bitrateCombo.Items.Add(c);
+            bitrateCombo.EndUpdate();
+            int i = choices.FindIndex(c => c.Tier == keep);
+            bitrateCombo.SelectedIndex = i >= 0 ? i : 1;
+        }
         rbWin.CheckedChanged += (_, _) =>
         {
             if (audioCombo.Items.Count >= 2)
                 audioCombo.Items[1] = rbWin.Checked
                     ? "Captured window's audio"
                     : "No audio (monitor share: pick an app below)";
+            UpdateDlgNativeLabel();
+            UpdateDlgBitrate();
         };
+        winCombo.SelectedIndexChanged += (_, _) => { UpdateDlgNativeLabel(); UpdateDlgBitrate(); };
+        monCombo.SelectedIndexChanged += (_, _) => { UpdateDlgNativeLabel(); UpdateDlgBitrate(); };
+        presetCombo.SelectedIndexChanged += (_, _) => UpdateDlgBitrate();
+        UpdateDlgBitrate();
 
-        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 5, Padding = new Padding(10) };
+        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 6, Padding = new Padding(10) };
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         grid.Controls.Add(rbWin, 0, 0);
@@ -638,8 +720,10 @@ public sealed class MainForm : Form
         grid.Controls.Add(monCombo, 1, 1);
         grid.Controls.Add(new Label { Text = "Preset:", AutoSize = true, Margin = new Padding(3, 8, 3, 0), ForeColor = Dim }, 0, 2);
         grid.Controls.Add(presetCombo, 1, 2);
-        grid.Controls.Add(new Label { Text = "Audio:", AutoSize = true, Margin = new Padding(3, 8, 3, 0), ForeColor = Dim }, 0, 3);
-        grid.Controls.Add(audioCombo, 1, 3);
+        grid.Controls.Add(new Label { Text = "Bitrate:", AutoSize = true, Margin = new Padding(3, 8, 3, 0), ForeColor = Dim }, 0, 3);
+        grid.Controls.Add(bitrateCombo, 1, 3);
+        grid.Controls.Add(new Label { Text = "Audio:", AutoSize = true, Margin = new Padding(3, 8, 3, 0), ForeColor = Dim }, 0, 4);
+        grid.Controls.Add(audioCombo, 1, 4);
 
         var ok = new Button { Text = _session is null ? "Start" : "Switch", Width = 96, Height = 28, DialogResult = DialogResult.OK };
         var cancel = new Button { Text = "Cancel", Width = 80, Height = 28, DialogResult = DialogResult.Cancel };
@@ -647,7 +731,7 @@ public sealed class MainForm : Form
         buttons.Controls.Add(cancel);
         buttons.Controls.Add(ok);
         grid.SetColumnSpan(buttons, 2);
-        grid.Controls.Add(buttons, 0, 4);
+        grid.Controls.Add(buttons, 0, 5);
         dlg.Controls.Add(grid);
         dlg.AcceptButton = ok;
         dlg.CancelButton = cancel;
@@ -662,6 +746,15 @@ public sealed class MainForm : Form
         if (monCombo.SelectedIndex >= 0) _monitorCombo.SelectedIndex = monCombo.SelectedIndex;
         if (presetCombo.SelectedIndex >= 0) _presetCombo.SelectedIndex = presetCombo.SelectedIndex;
         if (audioCombo.SelectedIndex >= 0) _audioCombo.SelectedIndex = audioCombo.SelectedIndex;
+        // Writing the source/preset back above repopulated the main bitrate combo;
+        // now apply the tier the user picked in the dialog.
+        if ((bitrateCombo.SelectedItem as BitrateChoice)?.Tier is { } tier)
+        {
+            int mi = -1;
+            for (int j = 0; j < _bitrateCombo.Items.Count; j++)
+                if ((_bitrateCombo.Items[j] as BitrateChoice)?.Tier == tier) { mi = j; break; }
+            if (mi >= 0) _bitrateCombo.SelectedIndex = mi;
+        }
         SwitchSource();
     }
 
@@ -680,7 +773,7 @@ public sealed class MainForm : Form
         _statsTimer.Stop();
         _statusLabel.Text = "Switching source…";
         _statusLabel.ForeColor = Color.Goldenrod;
-        AppendLog($"Switching to {config.SourceName} — viewers reconnect automatically.");
+        AppendLog($"Switching to {config.SourceName}. Viewers reconnect automatically.");
         SaveSettings();
         _session.RequestStop();
     }
@@ -696,9 +789,139 @@ public sealed class MainForm : Form
         _tray.Text = "StreamHost";
         _livePort = 0;
         _fixPortButton.Visible = false;
+        SetLiveLock(false);
         UpdateLinkBox();
         _statusLabel.Text = reason is null or "stopped" ? "Not streaming." : $"Stopped: {reason}";
         _statusLabel.ForeColor = reason is null or "stopped" ? Dim : Red;
+        StartIdleServer(); // take the port back so open tabs see "not streaming yet"
+    }
+
+    /// <summary>Serve the holding page whenever the app is open but no stream is
+    /// running: tabs opened early (or holding a link from a previous stream) get
+    /// "not streaming yet" and connect themselves once a stream starts. The
+    /// session and the idle server trade the port back and forth.</summary>
+    private void StartIdleServer()
+    {
+        if (_session is not null || _idleServer is not null) return;
+        try
+        {
+            _idleServer = new WebServer((int)_portInput.Value, null, null, _nameInput.Text.Trim());
+            _idleCts = new CancellationTokenSource();
+            _ = _idleServer.RunAsync(_idleCts.Token);
+        }
+        catch (Exception ex)
+        {
+            // Not fatal — most likely another StreamHost instance owns the port.
+            AppendLog($"[http] holding page unavailable: {ex.Message}");
+            _idleServer = null;
+            _idleCts = null;
+        }
+    }
+
+    private void StopIdleServer()
+    {
+        _idleCts?.Cancel();
+        _idleCts = null;
+        _idleServer?.Dispose();
+        _idleServer = null;
+    }
+
+    /// <summary>Port or name changed while idle — rebind so the holding page follows.</summary>
+    private void RestartIdleServer()
+    {
+        if (_session is not null || _stopping) return;
+        StopIdleServer();
+        StartIdleServer();
+    }
+
+    /// <summary>Rewrites the Native preset entries with the selected source's real
+    /// resolution, e.g. "Native · 60 fps (2560x1440)". The bitrate dropdown next
+    /// to it carries the Mbps numbers.</summary>
+    private void UpdateNativePresetLabel()
+    {
+        for (int idx = 0; idx < Presets.Length && idx < _presetCombo.Items.Count; idx++)
+        {
+            if (Presets[idx].Height != 0) continue;
+            string label = ComputeNativeLabel(Presets[idx].Fps, _rbWindow.Checked, _windowCombo.SelectedIndex, _monitorCombo.SelectedIndex);
+            if (_presetCombo.Items[idx] is Preset p && p.Label == label) continue;
+            int sel = _presetCombo.SelectedIndex;
+            _presetCombo.Items[idx] = Presets[idx] with { Label = label };
+            _presetCombo.SelectedIndex = sel;
+        }
+    }
+
+    private string ComputeNativeLabel(int fps, bool windowChecked, int windowIdx, int monitorIdx)
+    {
+        var (w, h) = SelectedSourceSize(windowChecked, windowIdx, monitorIdx);
+        return w > 0 && h > 0 ? $"Native · {fps} fps  ({w}x{h})" : $"Native · {fps} fps  (source size)";
+    }
+
+    /// <summary>While live, the pickers that only take effect through a restart
+    /// are locked so Switch source is the obvious path. Name, port, and encoder
+    /// stay editable (name/port are read at the next start; the encoder has no
+    /// place in the Switch popup).</summary>
+    private void SetLiveLock(bool locked)
+    {
+        bool on = !locked;
+        _rbWindow.Enabled = on;
+        _rbMonitor.Enabled = on;
+        _windowCombo.Enabled = on;
+        _monitorCombo.Enabled = on;
+        _presetCombo.Enabled = on;
+        _bitrateCombo.Enabled = on;
+        _audioCombo.Enabled = on;
+    }
+
+    /// <summary>Pixel size of the selected source: monitor resolution, or the
+    /// window's visible bounds. (0,0) when nothing is resolvable.</summary>
+    private (int W, int H) SelectedSourceSize(bool windowChecked, int windowIdx, int monitorIdx)
+    {
+        if (windowChecked)
+        {
+            if (windowIdx < 0 || windowIdx >= _windows.Count) return (0, 0);
+            IntPtr hwnd = _windows[windowIdx].Handle;
+            if (DwmGetWindowAttribute(hwnd, 9 /* DWMWA_EXTENDED_FRAME_BOUNDS */, out RECT r, Marshal.SizeOf<RECT>()) != 0)
+                GetWindowRect(hwnd, out r);
+            return (r.Right - r.Left, r.Bottom - r.Top);
+        }
+        if (monitorIdx >= 0 && monitorIdx < _monitors.Count)
+            return (_monitors[monitorIdx].Width, _monitors[monitorIdx].Height);
+        return (0, 0);
+    }
+
+    /// <summary>The Low/Medium/High options for a preset applied to a source:
+    /// the numbers come from the actual output size (pixel area, so a tall
+    /// portrait window is billed by its real pixel count, not its height).</summary>
+    private List<BitrateChoice> BuildBitrateChoices(Preset preset, bool windowChecked, int windowIdx, int monitorIdx)
+    {
+        var (srcW, srcH) = SelectedSourceSize(windowChecked, windowIdx, monitorIdx);
+        if (srcH <= 0) (srcW, srcH) = (1920, 1080); // nothing resolved yet
+        int outH = preset.Height > 0 && preset.Height < srcH ? preset.Height : srcH;
+        int outW = (int)Math.Round((double)srcW * outH / srcH);
+        var t = StreamSession.BitrateTiers(outW, outH, preset.Fps);
+        return
+        [
+            new BitrateChoice($"Low · {Mb(t.Low)} Mbps", t.Low, "low"),
+            new BitrateChoice($"Medium · {Mb(t.Medium)} Mbps", t.Medium, "med"),
+            new BitrateChoice($"High · {Mb(t.High)} Mbps", t.High, "high"),
+        ];
+    }
+
+    private static string Mb(int kbps) => kbps % 1000 == 0 ? (kbps / 1000).ToString() : (kbps / 1000.0).ToString("0.#");
+
+    /// <summary>Refills the bitrate dropdown for the current preset + source,
+    /// keeping the chosen tier (Low/Medium/High) across refills.</summary>
+    private void PopulateBitrateOptions()
+    {
+        if (_presetCombo.SelectedItem is not Preset preset) return;
+        string keepTier = (_bitrateCombo.SelectedItem as BitrateChoice)?.Tier ?? _savedBitrateTier;
+        var choices = BuildBitrateChoices(preset, _rbWindow.Checked, _windowCombo.SelectedIndex, _monitorCombo.SelectedIndex);
+        _bitrateCombo.BeginUpdate();
+        _bitrateCombo.Items.Clear();
+        foreach (var c in choices) _bitrateCombo.Items.Add(c);
+        _bitrateCombo.EndUpdate();
+        int idx = choices.FindIndex(c => c.Tier == keepTier);
+        _bitrateCombo.SelectedIndex = idx >= 0 ? idx : 1; // Medium
     }
 
     private void UpdateStatus()
@@ -708,23 +931,23 @@ public sealed class MainForm : Form
         if (b.State == "starting")
         {
             _statusLabel.ForeColor = Color.Goldenrod;
-            _statusLabel.Text = "Starting — waiting for the first captured frame…";
+            _statusLabel.Text = "Starting: waiting for the first captured frame…";
             return;
         }
         if (_session!.LocalOnly)
         {
             _fixPortButton.Visible = true;
             _statusLabel.ForeColor = Color.Goldenrod;
-            _statusLabel.Text = $"LIVE, THIS PC ONLY — click Fix access to let viewers reach port {_livePort}";
+            _statusLabel.Text = $"LIVE, THIS PC ONLY: click Fix access to let viewers reach port {_livePort}";
         }
         else
         {
             _fixPortButton.Visible = false;
             _statusLabel.ForeColor = Green;
-            _statusLabel.Text = $"LIVE — {_session.Description} · {EncoderLabel(_session.ActiveEncoder)}   viewers: {b.ViewerCount}   source: {b.SourceFps} fps (dup {b.DupPercent}%)";
+            _statusLabel.Text = $"LIVE · {_session.Description} · {EncoderLabel(_session.ActiveEncoder)}   viewers: {b.ViewerCount}   source: {b.SourceFps} fps (dup {b.DupPercent}%)";
         }
-        Text = $"StreamHost — LIVE ({b.ViewerCount} watching)";
-        _tray.Text = TruncateTray($"StreamHost — LIVE, {b.ViewerCount} watching");
+        Text = $"StreamHost - LIVE ({b.ViewerCount} watching)";
+        _tray.Text = TruncateTray($"StreamHost - LIVE, {b.ViewerCount} watching");
     }
 
     /// <summary>What's actually encoding right now, in GPU/CPU terms.</summary>
@@ -948,6 +1171,9 @@ public sealed class MainForm : Form
                 int idx = _windows.FindIndex(w => w.ProcessName.Equals(s.WindowProcess, StringComparison.OrdinalIgnoreCase));
                 if (idx >= 0) _windowCombo.SelectedIndex = idx;
             }
+            // Set the saved tier first: changing the preset index below fires
+            // PopulateBitrateOptions, which reads _savedBitrateTier to reselect.
+            if (s.BitrateTier is "low" or "med" or "high") _savedBitrateTier = s.BitrateTier;
             int presetIdx = Array.FindIndex(Presets, p => p.Height == s.PresetHeight && p.Fps == s.PresetFps);
             _presetCombo.SelectedIndex = presetIdx >= 0 ? presetIdx : DefaultPresetIndex;
             SelectAudioByKey(s.AudioSource);
@@ -972,6 +1198,7 @@ public sealed class MainForm : Form
                 MonitorIndex = Math.Max(_monitorCombo.SelectedIndex, 0),
                 PresetHeight = (_presetCombo.SelectedItem as Preset ?? Presets[DefaultPresetIndex]).Height,
                 PresetFps = (_presetCombo.SelectedItem as Preset ?? Presets[DefaultPresetIndex]).Fps,
+                BitrateTier = (_bitrateCombo.SelectedItem as BitrateChoice)?.Tier ?? "med",
                 AudioSource = SelectedAudioKey(),
                 Port = (int)_portInput.Value,
                 StreamName = _nameInput.Text.Trim(),

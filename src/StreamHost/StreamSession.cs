@@ -158,7 +158,7 @@ public sealed class StreamSession
 
         // 0 = auto: scale bitrate with what actually goes out. A "Native" preset
         // used to hardcode 12 Mbps even when native meant 1440p or 4K.
-        int bitrateKbps = _config.BitrateKbps > 0 ? _config.BitrateKbps : AutoBitrate(outH, _config.Fps);
+        int bitrateKbps = _config.BitrateKbps > 0 ? _config.BitrateKbps : AutoBitrate(outW, outH, _config.Fps);
         if (_config.BitrateKbps <= 0)
             Console.WriteLine($"[encoder] auto bitrate for {outH}p{_config.Fps}: {bitrateKbps} kbps");
 
@@ -389,16 +389,29 @@ public sealed class StreamSession
         return "stopped";
     }
 
-    /// <summary>Matches the quality presets: 12 Mbps at 1080p60, 18 at 1440p60,
-    /// 24 at 4K60; 30 fps gets two thirds.</summary>
-    private static int AutoBitrate(int outHeight, int fps)
+    /// <summary>Low/Medium/High bitrate options for an output size. Classified by
+    /// pixel AREA, not height — a 1080x1871 portrait window has 1080p-class pixels
+    /// and must not be billed as 4K just because it is tall. Boundaries are the
+    /// midpoints between the 16:9 standard sizes, 30 fps gets two thirds (rounded
+    /// to 0.5 Mbps), and High at 4K is the ceiling: nothing ever exceeds 35 Mbps.
+    /// Public because the app's bitrate dropdown shows exactly these numbers.</summary>
+    public static (int Low, int Medium, int High) BitrateTiers(int width, int height, int fps)
     {
-        int at60 = outHeight <= 720 ? 6000
-                 : outHeight <= 1080 ? 12000
-                 : outHeight <= 1440 ? 18000
-                 : 24000;
-        return fps >= 60 ? at60 : at60 * 2 / 3;
+        long px = (long)width * height;
+        var (lo, med, hi) = px <= 1_400_000 ? (4000, 6000, 8000)        // 720p-class
+                          : px <= 2_900_000 ? (8000, 12000, 16000)      // 1080p-class
+                          : px <= 5_500_000 ? (12000, 18000, 24000)     // 1440p-class
+                          : (18000, 25000, 35000);                      // 4K-class
+        if (fps < 60)
+        {
+            static int Third(int k) => (int)Math.Round(k * 2.0 / 3 / 500) * 500;
+            (lo, med, hi) = (Third(lo), Third(med), Third(hi));
+        }
+        return (lo, med, hi);
     }
+
+    /// <summary>What BitrateKbps=0 resolves to: the Medium tier for the real output size.</summary>
+    public static int AutoBitrate(int width, int height, int fps) => BitrateTiers(width, height, fps).Medium;
 
     /// <summary>Shareable IPv4s, best first. Ranks by the owning adapter, not just
     /// the address range: an active Tailscale interface wins, then physical private

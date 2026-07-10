@@ -30,8 +30,11 @@ STREAMING
 3. Copy link -> paste it to your friends. They open it in any browser.
    Hover the video for sound and volume controls, and fullscreen.
    The link includes a per-stream key, a new one is generated every time
-   you start a stream, so send a fresh link (or have them use "Find
-   streams" in the Watch window) after restarting.
+   you start a stream. Viewers on your Tailscale network pick the new key
+   up automatically if their tab or grid stays open; anyone else needs a
+   fresh link (or "Find streams" in the Watch window).
+   While the app is open but not streaming, the link shows "not streaming
+   yet" and connects on its own once you start.
 
 The window minimizes to the tray and keeps streaming. The app waits for
 the first captured frame before reporting the stream as live. If it

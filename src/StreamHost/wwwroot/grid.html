@@ -29,12 +29,15 @@
   header .spacer { flex: 1; }
   header .ghost { background: #1d2026; border: 1px solid #2e333b; color: #9aa1ab; }
   header .ghost:hover { background: #242830; color: #e6e8eb; }
-  /* Restore pill shown while the bar is hidden. Bottom-center: the tile
-     corners belong to the streams' own controls (the top-right ✕ was
-     unreachable under the old chip). Invisible until the mouse is over the
-     window, like the viewer's hover controls. */
+  /* Second header row: tailnet discovery. Only shown inside the app's Watch
+     window — the probing runs natively (tailscale CLI), results are pushed in. */
+  #finder { flex-basis: 100%; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  /* Restore pill shown while the bar is hidden. Top-center: matches where the
+     bar lives; the tile corners still belong to the streams' own controls.
+     Invisible until the mouse is over the window, like the viewer's hover
+     controls. */
   #showBar {
-    position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
+    position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
     z-index: 10; height: 30px; padding: 0 16px;
     display: none; align-items: center; justify-content: center; gap: 6px;
     background: rgba(22, 24, 28, .75); border: 1px solid #2e333b; border-radius: 999px;
@@ -81,10 +84,14 @@
   <span class="spacer"></span>
   <button id="layoutBtn" class="ghost" title="Switch between side-by-side and stacked streams">Stack vertically</button>
   <button id="hideBtn" class="ghost" title="Hide this bar">Hide bar</button>
+  <div id="finder">
+    <button id="findBtn" class="ghost" title="Search the tailnet for live streams">&#8635; Find streams</button>
+    <span id="findStatus" class="hint"></span>
+  </div>
 </header>
 <div id="showBar" title="Show the add-stream bar">&#9776; add streams</div>
 <div id="grid"></div>
-<div id="empty">No streams added yet.<br>Paste each friend's stream link above once — they'll stick around.</div>
+<div id="empty">No streams added yet.<br>Paste each stream link above once and it will stick around.</div>
 
 <script>
 "use strict";
@@ -219,6 +226,7 @@ function poll() {
         tile.querySelector(".name").textContent = s.name || url;
         tile.querySelector(".state").textContent = live
           ? `${s.sourceFps} fps · ${s.viewers} watching`
+          : s.state === "idle" ? "not streaming yet"
           : (s.state || "not streaming");
         // Hosts hand the current viewer key to tailnet/local callers; a restart
         // rotates it, so refresh the saved link when it changes (reloads the tile).
@@ -263,13 +271,35 @@ function applyBarVisibility() {
   const hidden = localStorage.getItem(HIDEBAR_KEY) === "1";
   headerEl.style.display = hidden ? "none" : "flex";
   showBar.style.display = hidden ? "flex" : "none";
-  // In the app's Watch window, the native Find-streams strip follows suit.
-  window.chrome?.webview?.postMessage({ barHidden: hidden });
   fixSpans();
 }
 document.getElementById("hideBtn").onclick = () => { localStorage.setItem(HIDEBAR_KEY, "1"); applyBarVisibility(); };
 showBar.onclick = () => { localStorage.setItem(HIDEBAR_KEY, "0"); applyBarVisibility(); };
 applyBarVisibility();
+
+// Find streams row: discovery runs in the app (it needs the tailscale CLI),
+// so the row only exists inside the Watch window's WebView2. The button asks
+// the host to search; the host pushes results back via setFoundStreams.
+const finder = document.getElementById("finder");
+const findStatus = document.getElementById("findStatus");
+if (window.chrome?.webview) {
+  document.getElementById("findBtn").onclick = () =>
+    window.chrome.webview.postMessage({ find: true });
+} else {
+  finder.style.display = "none";
+}
+window.setFoundStreams = function (streams, status) {
+  for (const b of finder.querySelectorAll("button.found")) b.remove();
+  for (const s of streams) {
+    const b = document.createElement("button");
+    b.className = "ghost found";
+    b.textContent = "+ " + s.name;
+    b.title = `${s.peer} · ${s.viewers} watching · click to add to the grid`;
+    b.onclick = () => window.addStream(s.url);
+    finder.appendChild(b);
+  }
+  findStatus.textContent = status || "";
+};
 
 document.getElementById("addBtn").onclick = add;
 urlInput.addEventListener("keydown", e => { if (e.key === "Enter") add(); });
