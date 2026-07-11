@@ -78,13 +78,28 @@ public sealed class ScreenCapture : ICaptureSource
         using (var mt = _context.QueryInterfaceOrNull<ID3D11Multithread>())
             mt?.SetMultithreadProtected(true);
 
+        // Capture adapter identity for the init log — on hybrid/multi-GPU boxes the
+        // capture adapter need not be the render or encoder adapter.
+        string adapterLuid = "?";
+        string driverVersion = "?";
         using (var dxgiDevice = _device.QueryInterface<IDXGIDevice>())
         using (var adapter = dxgiDevice.GetAdapter())
         {
             GpuVendorId = (uint)adapter.Description.VendorId;
             AdapterName = adapter.Description.Description;
+            // Best-effort LUID + UMD driver version — a diagnostics read must never
+            // throw out of the constructor or fail capture.
+            try
+            {
+                using var adapter1 = adapter.QueryInterface<IDXGIAdapter1>();
+                var luid = adapter1.Description1.Luid;
+                adapterLuid = $"{luid.HighPart}:{luid.LowPart}";
+                if (adapter1.CheckInterfaceSupport(typeof(IDXGIDevice), out long umd))
+                    driverVersion = $"{(umd >> 48) & 0xFFFF}.{(umd >> 32) & 0xFFFF}.{(umd >> 16) & 0xFFFF}.{umd & 0xFFFF}";
+            }
+            catch { /* diagnostics only — never fail capture over adapter identity */ }
         }
-        Console.WriteLine($"[capture] adapter: {AdapterName}, Windows {Environment.OSVersion.Version}");
+        Console.WriteLine($"[capture] adapter: {AdapterName}, Windows {Environment.OSVersion.Version} — LUID {adapterLuid}, driver {driverVersion}");
 
         _winrtDevice = D3DInterop.CreateWinRtDevice(_device);
         _item = item;
@@ -139,18 +154,31 @@ public sealed class ScreenCapture : ICaptureSource
             using var frame = sender.TryGetNextFrame();
             if (frame is null) return;
 
-            if (!_warnedResize && (frame.ContentSize.Width < Width || frame.ContentSize.Height < Height))
+            // The source can change size mid-session (game res switch, borderless/
+            // fullscreen toggle, launcher->game handoff, plain resize). Our pool and
+            // encode textures are fixed at the original size, so CLAMP the copy region
+            // to what is valid on both sides: a grown source is cropped to Width/Height,
+            // a shrunk source copies only its (smaller) valid area. Compare on the
+            // even-aligned content size so the harmless odd->even 1px rounding (an odd
+            // window is Width+1 every frame) is not read as a resize. Never stop the
+            // stream over this — the share stays live at its original dimensions.
+            int cw = frame.ContentSize.Width & ~1;
+            int ch = frame.ContentSize.Height & ~1;
+            int copyW = Math.Min(cw, Width);
+            int copyH = Math.Min(ch, Height);
+            if (!_warnedResize && (cw != Width || ch != Height))
             {
                 _warnedResize = true;
-                Console.WriteLine($"[capture] WARNING: source shrank to {frame.ContentSize.Width}x{frame.ContentSize.Height} — restart the share for clean output");
+                Console.WriteLine($"[capture] source resized to {frame.ContentSize.Width}x{frame.ContentSize.Height} — output stays at {Width}x{Height}; restart the share for a clean full-size capture");
             }
 
             using var texture = D3DInterop.GetTexture(frame.Surface);
             lock (_gate)
             {
                 // Region copy: window sizes can be odd, our encode textures are even-aligned.
+                // copyW/copyH are clamped to the source so the region can never exceed it.
                 _context.CopySubresourceRegion(_latest, 0, 0, 0, 0, texture, 0,
-                    new Box(0, 0, 0, Width, Height, 1));
+                    new Box(0, 0, 0, copyW, copyH, 1));
             }
             _hasFrame = true;
             Interlocked.Increment(ref _framesArrived);

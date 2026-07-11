@@ -74,10 +74,25 @@ public sealed class DuplicationCapture : ICaptureSource
         if (foundAdapter is null || foundOutput is null)
             throw new InvalidOperationException("Monitor not found among DXGI outputs");
 
+        // Capture adapter identity for the init log — on hybrid/multi-GPU boxes the
+        // capture adapter need not be the render or encoder adapter.
+        string adapterLuid = "?";
+        string driverVersion = "?";
         try
         {
             AdapterName = foundAdapter.Description1.Description;
             GpuVendorId = (uint)foundAdapter.Description1.VendorId;
+            var luid = foundAdapter.Description1.Luid;
+            adapterLuid = $"{luid.HighPart}:{luid.LowPart}";
+            // Best-effort UMD driver version, decoded from the packed long into the
+            // conventional four 16-bit fields — a diagnostics read must never throw
+            // out of the constructor or fail capture.
+            try
+            {
+                if (foundAdapter.CheckInterfaceSupport(typeof(IDXGIDevice), out long umd))
+                    driverVersion = $"{(umd >> 48) & 0xFFFF}.{(umd >> 32) & 0xFFFF}.{(umd >> 16) & 0xFFFF}.{umd & 0xFFFF}";
+            }
+            catch { driverVersion = "?"; }
 
             D3D11.D3D11CreateDevice(
                 foundAdapter, DriverType.Unknown, DeviceCreationFlags.BgraSupport,
@@ -116,7 +131,7 @@ public sealed class DuplicationCapture : ICaptureSource
             foundAdapter.Dispose();
         }
 
-        Console.WriteLine($"[capture] desktop duplication on {AdapterName}, {Width}x{Height}");
+        Console.WriteLine($"[capture] desktop duplication on {AdapterName}, {Width}x{Height} — LUID {adapterLuid}, driver {driverVersion}");
 
         var desc = new Texture2DDescription
         {
@@ -162,20 +177,32 @@ public sealed class DuplicationCapture : ICaptureSource
                 }
                 result.CheckError();
 
-                using (resource)
-                using (var texture = resource!.QueryInterface<ID3D11Texture2D>())
+                // The acquire succeeded — we now own the frame and MUST release it
+                // on every exit path (incl. an exception in the copy, the
+                // QueryInterface, or GetFramePointerShape inside UpdatePointer)
+                // BEFORE the outer catch runs Reduplicate on the duplication object.
+                try
                 {
-                    lock (_gate)
+                    using (resource)
+                    using (var texture = resource!.QueryInterface<ID3D11Texture2D>())
                     {
-                        _context.CopySubresourceRegion(_latest, 0, 0, 0, 0, texture, 0,
-                            new Vortice.Mathematics.Box(0, 0, 0, Width, Height, 1));
+                        lock (_gate)
+                        {
+                            _context.CopySubresourceRegion(_latest, 0, 0, 0, 0, texture, 0,
+                                new Vortice.Mathematics.Box(0, 0, 0, Width, Height, 1));
+                        }
                     }
+                    // Pointer metadata must be read between Acquire and Release.
+                    // Mouse-only updates also arrive as frames, which is what makes
+                    // the composited cursor move smoothly on an otherwise static screen.
+                    if (frameInfo.LastMouseUpdateTime != 0) UpdatePointer(frameInfo);
                 }
-                // Pointer metadata must be read between Acquire and Release.
-                // Mouse-only updates also arrive as frames, which is what makes
-                // the composited cursor move smoothly on an otherwise static screen.
-                if (frameInfo.LastMouseUpdateTime != 0) UpdatePointer(frameInfo);
-                _duplication.ReleaseFrame();
+                finally
+                {
+                    // Guard the release so its own failure can't mask the original
+                    // exception — the outer catch logs that one.
+                    try { _duplication.ReleaseFrame(); } catch { }
+                }
                 _hasFrame = true;
                 Interlocked.Increment(ref _framesArrived);
                 try { _frameSignal.Set(); } catch (ObjectDisposedException) { }
