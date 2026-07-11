@@ -116,7 +116,6 @@ public sealed class MainForm : Form
         Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical,
         Dock = DockStyle.Fill, Font = new Font("Consolas", 8.5f), BorderStyle = BorderStyle.None,
     };
-    private readonly NotifyIcon _tray = new();
     private readonly System.Windows.Forms.Timer _statsTimer = new() { Interval = 1000 };
 
     private List<WindowDescription> _windows = [];
@@ -150,6 +149,10 @@ public sealed class MainForm : Form
     // "not streaming yet" and connect themselves once a stream starts.
     private WebServer? _idleServer;
     private CancellationTokenSource? _idleCts;
+    // When the port is momentarily taken (another app, a just-closed session),
+    // keep retrying the holding page instead of giving up for the whole run.
+    private readonly System.Windows.Forms.Timer _idleRetryTimer = new() { Interval = 15000 };
+    private bool _idleBindFailed;
 
     public MainForm()
     {
@@ -277,6 +280,7 @@ public sealed class MainForm : Form
         _portInput.ValueChanged += (_, _) => { UpdateLinkBox(); RestartIdleServer(); };
         _nameInput.Leave += (_, _) => RestartIdleServer(); // idle stats carry the name
         _statsTimer.Tick += (_, _) => UpdateStatus();
+        _idleRetryTimer.Tick += (_, _) => StartIdleServer();
 
         ConsoleMirror.LineWritten += line =>
         {
@@ -284,32 +288,7 @@ public sealed class MainForm : Form
             try { BeginInvoke(() => AppendLog(line)); } catch { }
         };
 
-        _tray.Icon = Icon;
-        _tray.Text = "StreamHost";
-        _tray.Visible = false;
-        _tray.DoubleClick += (_, _) => RestoreFromTray();
-        var trayMenu = new ContextMenuStrip();
-        trayMenu.Items.Add("Open", null, (_, _) => RestoreFromTray());
-        trayMenu.Items.Add("Open logs folder", null, (_, _) =>
-        {
-            var dir = Path.GetDirectoryName(ConsoleMirror.LogFilePath);
-            if (dir is not null)
-                try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(dir) { UseShellExecute = true }); } catch { }
-        });
-        trayMenu.Items.Add("Exit", null, (_, _) => { _tray.Visible = false; Application.Exit(); });
-        _tray.ContextMenuStrip = trayMenu;
-
-        Resize += (_, _) =>
-        {
-            if (WindowState == FormWindowState.Minimized)
-            {
-                Hide();
-                _tray.Visible = true;
-                if (_session is not null)
-                    _tray.ShowBalloonTip(1500, "StreamHost", "Still streaming. Double-click to reopen.", ToolTipIcon.Info);
-            }
-        };
-        FormClosing += (_, _) => { SaveSettings(); _statsTimer.Stop(); _session?.Stop(); StopIdleServer(); _tray.Visible = false; };
+        FormClosing += (_, _) => { SaveSettings(); _statsTimer.Stop(); _session?.Stop(); StopIdleServer(); };
         // Closing the panel stops YOUR stream but leaves an open Watch window
         // alive so you can keep viewing; the app exits with its last window.
         // (The message loop is Application.Run() without a form, see Program.)
@@ -379,12 +358,30 @@ public sealed class MainForm : Form
         }
     }
 
-    private void RestoreFromTray()
+    /// <summary>Bring the window back to the user: a second launch of the app
+    /// broadcasts SingleInstance.ShowMessage, and this is where the running
+    /// instance answers it (un-minimize, raise, focus). The TopMost flip is the
+    /// standard way past Windows' foreground-lock, which otherwise just flashes
+    /// the taskbar button instead of actually raising the window.</summary>
+    private void ShowAndActivate()
     {
+        if (WindowState == FormWindowState.Minimized)
+            WindowState = FormWindowState.Normal;
         Show();
-        WindowState = FormWindowState.Normal;
-        _tray.Visible = false;
+        bool wasTop = TopMost;
+        TopMost = true;
+        TopMost = wasTop;
         Activate();
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == Util.SingleInstance.ShowMessage)
+        {
+            ShowAndActivate();
+            return;
+        }
+        base.WndProc(ref m);
     }
 
     private void PopulateSources()
@@ -786,7 +783,6 @@ public sealed class MainForm : Form
         _startButton.Text = "▶  Start streaming";
         _startButton.BackColor = AccentDark;
         Text = "StreamHost";
-        _tray.Text = "StreamHost";
         _livePort = 0;
         _fixPortButton.Visible = false;
         SetLiveLock(false);
@@ -802,24 +798,36 @@ public sealed class MainForm : Form
     /// session and the idle server trade the port back and forth.</summary>
     private void StartIdleServer()
     {
-        if (_session is not null || _idleServer is not null) return;
+        if (_session is not null || _idleServer is not null) { _idleRetryTimer.Stop(); return; }
         try
         {
             _idleServer = new WebServer((int)_portInput.Value, null, null, _nameInput.Text.Trim());
             _idleCts = new CancellationTokenSource();
             _ = _idleServer.RunAsync(_idleCts.Token);
+            _idleRetryTimer.Stop();
+            _idleBindFailed = false;
         }
         catch (Exception ex)
         {
-            // Not fatal — most likely another StreamHost instance owns the port.
-            AppendLog($"[http] holding page unavailable: {ex.Message}");
+            // Not fatal — usually another program owns the port right now. Log it
+            // once (not every retry), then keep retrying quietly so the holding
+            // page comes back on its own the moment the port frees up.
+            if (!_idleBindFailed)
+            {
+                _idleBindFailed = true;
+                AppendLog($"[http] holding page unavailable: {ex.Message}");
+                AppendLog("[http] will keep trying to open the holding page until the port is free.");
+            }
             _idleServer = null;
             _idleCts = null;
+            _idleRetryTimer.Start();
         }
     }
 
     private void StopIdleServer()
     {
+        _idleRetryTimer.Stop();
+        _idleBindFailed = false;
         _idleCts?.Cancel();
         _idleCts = null;
         _idleServer?.Dispose();
@@ -947,7 +955,6 @@ public sealed class MainForm : Form
             _statusLabel.Text = $"LIVE · {_session.Description} · {EncoderLabel(_session.ActiveEncoder)}   viewers: {b.ViewerCount}   source: {b.SourceFps} fps (dup {b.DupPercent}%)";
         }
         Text = $"StreamHost - LIVE ({b.ViewerCount} watching)";
-        _tray.Text = TruncateTray($"StreamHost - LIVE, {b.ViewerCount} watching");
     }
 
     /// <summary>What's actually encoding right now, in GPU/CPU terms.</summary>
@@ -960,8 +967,6 @@ public sealed class MainForm : Form
         null => "starting",
         _ => encoder,
     };
-
-    private static string TruncateTray(string s) => s.Length <= 63 ? s : s[..63];
 
     private string BuildUrl(string pathSuffix)
     {
@@ -1086,7 +1091,9 @@ public sealed class MainForm : Form
                 : "session:  not streaming");
             sb.AppendLine($"settings: {ReadSmallFile(SettingsPath)}");
             sb.AppendLine("---- last 200 log lines ----");
-            string[] lines = _logBox.Lines;
+            // Prefer the on-disk log: it carries per-line timestamps (the box
+            // does not), which is what makes a stall report diagnosable.
+            string[] lines = ReadLogTail(200) ?? _logBox.Lines;
             foreach (string line in lines.Skip(Math.Max(0, lines.Length - 200)))
                 sb.AppendLine(RedactKey(line));
             Clipboard.SetText(sb.ToString());
@@ -1150,6 +1157,25 @@ public sealed class MainForm : Form
     {
         try { return File.Exists(path) ? File.ReadAllText(path).Replace("\r", "").Replace('\n', ' ') : "(none)"; }
         catch { return "(unreadable)"; }
+    }
+
+    /// <summary>Last N lines of the timestamped log file, or null if it can't be
+    /// read (the caller then falls back to the on-screen log box). Opens shared
+    /// for read/write because ConsoleMirror still has the file open.</summary>
+    private static string[]? ReadLogTail(int count)
+    {
+        try
+        {
+            string? path = ConsoleMirror.LogFilePath;
+            if (path is null || !File.Exists(path)) return null;
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new StreamReader(fs);
+            var all = new List<string>();
+            string? line;
+            while ((line = reader.ReadLine()) is not null) all.Add(line);
+            return all.Skip(Math.Max(0, all.Count - count)).ToArray();
+        }
+        catch { return null; }
     }
 
     // ---- settings ---------------------------------------------------------

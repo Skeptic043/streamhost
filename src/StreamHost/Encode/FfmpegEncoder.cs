@@ -43,6 +43,12 @@ public sealed class FfmpegEncoder : IDisposable
             ? "-map 0:v -map 1:a -c:a aac -b:a 160k "
             : "-an ";
 
+        // -max_interleave_delta: the muxer's default is to hold finished video
+        // packets up to 10 SECONDS waiting for the other stream's timestamps to
+        // catch up. A stalled audio feed therefore froze the entire fragment
+        // output (indistinguishable from an encoder stall). Half a second keeps
+        // interleaving tight in the healthy case and force-flushes video-only
+        // fragments when audio starves — a degraded stream instead of no stream.
         string args =
             $"-hide_banner -loglevel warning " +
             $"-thread_queue_size 128 -f rawvideo -pixel_format bgra -video_size {inWidth}x{inHeight} -framerate {fps} -i pipe:0 " +
@@ -52,6 +58,7 @@ public sealed class FfmpegEncoder : IDisposable
             $"-b:v {bitrateKbps}k -maxrate {bitrateKbps * 5 / 4}k -bufsize {bitrateKbps / 2}k " +
             $"-g {gop} -bf 0 -pix_fmt yuv420p " +
             $"-f mp4 -movflags +empty_moov+default_base_moof -frag_duration {fragUs} " +
+            $"-max_interleave_delta 500000 " +
             $"-flush_packets 1 pipe:1";
 
         _process = new Process
@@ -75,6 +82,7 @@ public sealed class FfmpegEncoder : IDisposable
         };
         Console.WriteLine($"[encoder] ffmpeg {args}");
         _process.Start();
+        Util.ChildJob.Adopt(_process); // dies with us, even on a force-quit
         _process.BeginErrorReadLine();
         _stdin = _process.StandardInput.BaseStream;
     }
@@ -175,6 +183,7 @@ public sealed class FfmpegEncoder : IDisposable
                 CreateNoWindow = true,
             };
             using var p = Process.Start(psi)!;
+            Util.ChildJob.Adopt(p);
             // A stall shows up as a hang: WaitForExit times out, we kill it, it fails.
             if (!p.WaitForExit(12000)) { try { p.Kill(entireProcessTree: true); } catch { } return false; }
             return p.ExitCode == 0;

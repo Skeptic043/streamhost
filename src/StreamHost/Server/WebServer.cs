@@ -39,8 +39,11 @@ public sealed class WebServer : IDisposable
         _wwwroot = Path.Combine(AppContext.BaseDirectory, "wwwroot");
 
         // A failed Start() poisons the HttpListener, so each attempt gets a fresh one.
+        // The wildcard needs a urlacl (or admin); localhost always works for this
+        // user — so falling through to localhost means "no remote access yet",
+        // while failing BOTH means the port itself is taken by another process.
         (_listener, BoundPrefix) = TryBind($"http://+:{port}/") ?? TryBind($"http://localhost:{port}/")
-            ?? throw new InvalidOperationException($"Could not bind port {port}");
+            ?? throw new InvalidOperationException(DescribeBindFailure(port));
         if (BoundPrefix.Contains("localhost"))
         {
             Console.WriteLine(_broadcaster is null
@@ -63,6 +66,30 @@ public sealed class WebServer : IDisposable
             try { listener.Close(); } catch { }
             return null;
         }
+    }
+
+    /// <summary>Turns a total bind failure into an actionable message: name the
+    /// likely culprit (another StreamHost answers /api/stats) so the user closes
+    /// the right thing instead of force-quitting blindly.</summary>
+    private static string DescribeBindFailure(int port)
+    {
+        string culprit = ProbedAnotherStreamHost(port)
+            ? "another StreamHost is already running on this port (check the taskbar or Task Manager and close it, or pick a different port)"
+            : "another program is using this port — close it or pick a different port";
+        return $"Port {port} is already in use: {culprit}.";
+    }
+
+    /// <summary>Best-effort: does something on this port answer like our own
+    /// /api/stats? A short timeout keeps the error path snappy.</summary>
+    private static bool ProbedAnotherStreamHost(int port)
+    {
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromMilliseconds(600) };
+            string body = http.GetStringAsync($"http://localhost:{port}/api/stats").GetAwaiter().GetResult();
+            return body.Contains("\"state\"");
+        }
+        catch { return false; }
     }
 
     public async Task RunAsync(CancellationToken ct)

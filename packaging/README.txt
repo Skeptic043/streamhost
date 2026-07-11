@@ -36,11 +36,13 @@ STREAMING
    While the app is open but not streaming, the link shows "not streaming
    yet" and connects on its own once you start.
 
-The window minimizes to the tray and keeps streaming. The app waits for
-the first captured frame before reporting the stream as live. If it
-stops with a capture error instead, use "Copy log" (it includes
-version, system, GPU, and encoder info along with the recent log)
-and send that along.
+Minimizing keeps the app on the taskbar and keeps streaming; closing the
+window stops your stream. If StreamHost is already running, launching it
+again just brings that window back instead of opening a second copy. The
+app waits for the first captured frame before reporting the stream as
+live. If it stops with a capture error instead, use "Copy log" (it
+includes version, system, GPU, and encoder info along with the recent
+log) and send that along.
 
 WATCHING MULTIPLE STREAMS, THE GRID
 ------------------------------------
@@ -77,10 +79,9 @@ TIPS
 
 IF SOMETHING BREAKS
 -------------------
-Every run writes a log file (path is printed at the top of the app's
-log panel; tray icon -> Open logs folder). "Copy log" puts the session
-log plus version, system, GPU, and encoder info on the clipboard.
-Paste it when reporting a problem.
+Every run writes a log file (its path is printed at the top of the app's
+log panel). "Copy log" puts the session log plus version, system, GPU,
+and encoder info on the clipboard. Paste it when reporting a problem.
 
 - Stream page never loads: the port isn't open yet, or Tailscale isn't
   connected on one end. Click "Fix access" in the app (or run setup.bat
@@ -90,3 +91,6 @@ Paste it when reporting a problem.
 - Page loads but video never starts: same as above, the port that
   viewers' browsers connect to isn't reachable yet. Re-run "Fix access"
   or setup.bat.
+- "Port ... is already in use": another program (often another copy of
+  StreamHost still running) has that port. Close it, or set a different
+  port in the app.

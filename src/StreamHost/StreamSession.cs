@@ -168,6 +168,26 @@ public sealed class StreamSession
             audioPipe = new NamedPipeServerStream(audioPipeName, PipeDirection.Out, 1,
                 PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
 
+        // Every exit path — including a failed port bind throwing out of the
+        // WebServer constructor below — must cancel and release the audio
+        // machinery: the pipe-connection continuation otherwise creates a
+        // capture into a dead session and leaks it (busy thread, WASAPI
+        // session, the pipe itself). Declared before the ffmpeg/server usings
+        // so it runs last, after they are gone.
+        using var audioTeardown = new Teardown(() =>
+        {
+            _cts.Cancel();
+            // Dispose the pipe first: it unblocks the capture's writer thread if
+            // it is parked on a Write to a now-dead ffmpeg, so the Dispose join
+            // below returns immediately instead of eating its full timeout.
+            audioPipe?.Dispose();
+            lock (_audioGate)
+            {
+                _audioCapture?.Dispose();
+                _audioCapture = null;
+            }
+        });
+
         using var ffmpeg = new FfmpegEncoder(capture.Width, capture.Height, _config.Fps,
             bitrateKbps, outW, outH, encoder, audioPipeName, _config.FragMs);
 
@@ -268,6 +288,18 @@ public sealed class StreamSession
         // produces fragments — a zero-fragment window can only mean a stall.
         var watchdog = new Thread(() =>
         {
+            // Wait for the header first: fragments cannot exist before it, and
+            // on a machine pegged by the game ffmpeg's startup alone can eat
+            // seconds — the old fixed window (counted from the first captured
+            // frame) tripped on slow starts and blamed the encoder.
+            if (!broadcaster.WaitForInit(TimeSpan.FromSeconds(10), ct))
+            {
+                if (ct.IsCancellationRequested) return;
+                _encoderStalled = true;
+                Console.Error.WriteLine($"[encoder] {ffmpeg.EncoderName} produced no output at all in 10s — the encoder is stalled.");
+                _cts.Cancel();
+                return;
+            }
             long baseline = Interlocked.Read(ref broadcaster.FragmentsSent);
             bool firstWindow = true;
             while (!ct.WaitHandle.WaitOne(firstWindow ? 5000 : 10000))
@@ -279,7 +311,7 @@ public sealed class StreamSession
                 {
                     _encoderStalled = true;
                     Console.Error.WriteLine(firstWindow
-                        ? $"[encoder] {ffmpeg.EncoderName} wrote the header but produced no video in 5s — the GPU encoder is stalling."
+                        ? $"[encoder] {ffmpeg.EncoderName} wrote the header but produced almost no video in 5s — the encoder is stalling."
                         : $"[encoder] {ffmpeg.EncoderName} stopped producing video mid-stream — the encoder has stalled.");
                     _cts.Cancel();
                     return;
@@ -296,14 +328,8 @@ public sealed class StreamSession
 
         Console.WriteLine("[shutdown] stopping…");
         _cts.Cancel();
-        lock (_audioGate)
-        {
-            _audioCapture?.Dispose();
-            _audioCapture = null;
-        }
-        audioPipe?.Dispose();
         try { Task.WaitAll(new[] { splitterTask, serverTask }, 3000); } catch { }
-        return exitReason;
+        return exitReason; // audioTeardown finishes the audio cleanup on the way out
     }
 
     private string PacingLoop(ICaptureSource capture, FfmpegEncoder ffmpeg, Broadcaster broadcaster,
@@ -412,6 +438,12 @@ public sealed class StreamSession
 
     /// <summary>What BitrateKbps=0 resolves to: the Medium tier for the real output size.</summary>
     public static int AutoBitrate(int width, int height, int fps) => BitrateTiers(width, height, fps).Medium;
+
+    /// <summary>Runs the given cleanup on dispose — scope-exit guard for RunCore.</summary>
+    private sealed class Teardown(Action action) : IDisposable
+    {
+        public void Dispose() => action();
+    }
 
     /// <summary>Shareable IPv4s, best first. Ranks by the owning adapter, not just
     /// the address range: an active Tailscale interface wins, then physical private

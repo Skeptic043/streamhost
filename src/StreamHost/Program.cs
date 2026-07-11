@@ -36,6 +36,11 @@ internal static class Program
         // Double-click (no args) → the app window. CLI args → console mode.
         if (args.Length == 0)
         {
+            // Already running? Surface that window instead of starting a second
+            // process that would just collide on the port and confuse the user.
+            if (!Util.SingleInstance.TryAcquire())
+                return 0;
+
             Util.ConsoleMirror.Install();
             System.Windows.Forms.Application.SetHighDpiMode(System.Windows.Forms.HighDpiMode.SystemAware);
             System.Windows.Forms.Application.EnableVisualStyles();

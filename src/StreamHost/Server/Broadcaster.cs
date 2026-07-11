@@ -41,6 +41,14 @@ public sealed class Broadcaster
     public volatile string State = "starting"; // starting → live → stopped/failed
     public bool HasAudio { get; set; }
 
+    /// <summary>Blocks until ffmpeg's header (init segment) has arrived — the
+    /// earliest moment fragment production can possibly start.</summary>
+    public bool WaitForInit(TimeSpan timeout, CancellationToken ct)
+    {
+        try { return _initReady.Task.Wait((int)timeout.TotalMilliseconds, ct); }
+        catch (OperationCanceledException) { return false; }
+    }
+
     public void SetInit(byte[] init, string codec)
     {
         _init = init;
