@@ -29,6 +29,9 @@ public static class PortSetup
         // custom SDDL — which is acceptable here and far better than silently
         // destroying a foreign reservation.
         string? priorUser = ReadReservationUser(port);
+        // Also capture the firewall rule's current scope, so a failed add can put
+        // a rule back instead of leaving the user with none.
+        string? priorRuleRemoteIp = ReadRuleRemoteIp(port);
 
         Exec($"http delete urlacl url=http://+:{port}/");
         if (Exec($"http add urlacl url=http://+:{port}/ user=\"{user}\"") != 0)
@@ -46,6 +49,12 @@ public static class PortSetup
             Exec($"http delete urlacl url=http://+:{port}/");
             if (priorUser is not null)
                 Exec($"http add urlacl url=http://+:{port}/ user=\"{priorUser}\"");
+            // The failed add followed a delete, so no rule is left. Re-add one at
+            // the prior scope; if that scope was unreadable, fail CLOSED to the
+            // Tailscale-only default rather than silently reopening the LAN.
+            // Best-effort — ignore its exit; the user is never left with no rule.
+            string restoreIp = priorRuleRemoteIp ?? TailscaleRange;
+            Exec($"advfirewall firewall add rule name=\"StreamHost {port}\" dir=in action=allow protocol=TCP localport={port} remoteip={restoreIp}");
             return 3;
         }
 
@@ -54,7 +63,10 @@ public static class PortSetup
 
     /// <summary>The account currently granted this URL, or null if none is
     /// reserved. Parsed from the "User:" line of `netsh http show urlacl`, which
-    /// is a read-only call and needs no elevation.</summary>
+    /// is a read-only call and needs no elevation. Unlike MainForm's owner check,
+    /// this deliberately returns null (not a sentinel) when unparseable: it feeds
+    /// the `add urlacl user=` rollback, where a sentinel would corrupt the
+    /// restore. A best-effort rollback that skips is the right failure here.</summary>
     private static string? ReadReservationUser(int port)
     {
         try
@@ -66,6 +78,28 @@ public static class PortSetup
                 if (idx < 0) continue;
                 string owner = line[(idx + 5)..].Trim();
                 return owner.Length == 0 ? null : owner;
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    /// <summary>The RemoteIP scope currently on this port's firewall rule, or null
+    /// if the rule / the "RemoteIP:" line isn't present or can't be parsed.
+    /// Read-only `netsh advfirewall firewall show rule`, no elevation needed. The
+    /// English "RemoteIP:" label is fine to key on: a parse miss returns null and
+    /// the caller fails closed to the Tailscale-only default.</summary>
+    private static string? ReadRuleRemoteIp(int port)
+    {
+        try
+        {
+            var r = ProcessRunner.Run("netsh", $"advfirewall firewall show rule name=\"StreamHost {port}\"", 5000);
+            foreach (var line in r.StdOut.Split('\n'))
+            {
+                int idx = line.IndexOf("RemoteIP:", StringComparison.OrdinalIgnoreCase);
+                if (idx < 0) continue;
+                string ip = line[(idx + 9)..].Trim();
+                return ip.Length == 0 ? null : ip;
             }
         }
         catch { }

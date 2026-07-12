@@ -289,8 +289,19 @@ public sealed class StreamSession
         string keySuffix = _config.ViewKey is null ? "" : $"?k={_config.ViewKey}";
         Console.WriteLine($"[ready] first frame captured — streaming {Description} via {encoder}");
         Console.WriteLine($"[ready] watch at: http://localhost:{_config.Port}/{keySuffix}");
-        foreach (var ip in GetShareAddresses())
+        // Tailscale addresses are in scope in every firewall config, so they are
+        // always live. LAN addresses only work if LAN access was actually opened;
+        // console mode has no persisted scope, so the honest form is a caveat.
+        var shareAddrs = GetShareAddresses();
+        foreach (var ip in shareAddrs.Where(IsTailscaleAddress))
             Console.WriteLine($"[ready]           http://{ip}:{_config.Port}/{keySuffix}");
+        var lanAddrs = shareAddrs.Where(ip => !IsTailscaleAddress(ip)).ToList();
+        if (lanAddrs.Count > 0)
+        {
+            Console.WriteLine($"[ready] the LAN links below only work if you allowed LAN access (setup.bat or Fix access with Allow LAN):");
+            foreach (var ip in lanAddrs)
+                Console.WriteLine($"[ready]           http://{ip}:{_config.Port}/{keySuffix}");
+        }
 
         // Independent encoder-output watchdog. A stalled GPU encoder makes ffmpeg
         // stop reading stdin, which blocks the pacing loop itself — so the stall
@@ -458,12 +469,28 @@ public sealed class StreamSession
         public void Dispose() => action();
     }
 
+    /// <summary>True iff <paramref name="ip"/> is a Tailscale CGNAT address
+    /// (100.64.0.0/10): a dotted quad whose first octet is 100 and second octet
+    /// 64..127. These are in scope in every firewall config, so a Tailscale
+    /// address is always safe to advertise.</summary>
+    public static bool IsTailscaleAddress(string ip)
+    {
+        string[] parts = ip.Split('.');
+        return parts.Length == 4
+            && byte.TryParse(parts[0], out byte a) && a == 100
+            && byte.TryParse(parts[1], out byte b) && b >= 64 && b <= 127
+            && byte.TryParse(parts[2], out _)
+            && byte.TryParse(parts[3], out _);
+    }
+
     /// <summary>Shareable IPv4s, best first. Ranks by the owning adapter, not just
     /// the address range: an active Tailscale interface wins, then physical private
     /// LAN adapters with a default route. Hyper-V/WSL/Docker/VM adapters and
     /// link-local addresses are excluded entirely — copying one of those produced
-    /// links that worked for the streamer and nobody else.</summary>
-    public static List<string> GetShareAddresses()
+    /// links that worked for the streamer and nobody else. When
+    /// <paramref name="includeLan"/> is false, only Tailscale addresses are
+    /// returned (LAN links aren't reachable unless LAN access was applied).</summary>
+    public static List<string> GetShareAddresses(bool includeLan = true)
     {
         var ranked = new List<(int Rank, string Addr)>();
         try
@@ -512,15 +539,19 @@ public sealed class StreamSession
         catch { }
 
         if (ranked.Count > 0)
-            return ranked.OrderBy(r => r.Rank).Select(r => r.Addr).Distinct().ToList();
+        {
+            var result = ranked.OrderBy(r => r.Rank).Select(r => r.Addr).Distinct().ToList();
+            return includeLan ? result : result.Where(IsTailscaleAddress).ToList();
+        }
 
         // Fallback: the old DNS-based list, better than handing out nothing.
         try
         {
-            return Dns.GetHostAddresses(Dns.GetHostName())
+            var result = Dns.GetHostAddresses(Dns.GetHostName())
                 .Where(a => a.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(a))
                 .Select(a => a.ToString())
                 .ToList();
+            return includeLan ? result : result.Where(IsTailscaleAddress).ToList();
         }
         catch { return []; }
     }

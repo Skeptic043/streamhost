@@ -58,7 +58,11 @@ echo Adding firewall rule for port %PORT% (allowed ranges: %RANGES%)...
 netsh advfirewall firewall delete rule name="StreamHost %PORT%" >nul 2>&1
 netsh advfirewall firewall add rule name="StreamHost %PORT%" dir=in action=allow protocol=TCP localport=%PORT% remoteip=%RANGES% >nul
 if %errorlevel% neq 0 (
-    echo   FAILED: could not add the firewall rule. Include this window's text when reporting.
+    echo   FAILED: could not add the firewall rule.
+    echo   LAN access was not applied. Restoring a Tailscale-only rule so you
+    echo   are not left without one.
+    netsh advfirewall firewall add rule name="StreamHost %PORT%" dir=in action=allow protocol=TCP localport=%PORT% remoteip=100.64.0.0/10 >nul
+    echo   Include this window's text when reporting.
     pause
     exit /b 1
 )

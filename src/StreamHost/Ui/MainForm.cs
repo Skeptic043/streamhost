@@ -87,6 +87,9 @@ public sealed class MainForm : Form
         public int Port { get; set; } = 8093;
         public string StreamName { get; set; } = ""; // shown to viewers; empty = machine name
         public string Encoder { get; set; } = "auto";
+        // Set only when a Fix access with "Allow LAN" checked actually succeeded,
+        // so the app knows LAN addresses are reachable (not merely requested).
+        public bool AllowLan { get; set; }
     }
 
     private static readonly string SettingsPath = Path.Combine(
@@ -135,6 +138,10 @@ public sealed class MainForm : Form
     private SessionConfig? _lastConfig;   // last launched config, reused for the fix-port restart
     private SessionConfig? _pendingSwitch; // queued source switch, launched when Stopped fires
     private string _savedBitrateTier = "med"; // from settings, applied on the first populate
+    // Persisted "LAN access was actually applied" flag: set only on a successful
+    // Fix access with Allow LAN checked, never on a mere checkbox toggle. Gates
+    // whether LAN addresses are treated as reachable for links and status.
+    private bool _allowLanApplied;
 
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
@@ -996,10 +1003,28 @@ public sealed class MainForm : Form
         }
         else
         {
-            _fixPortButton.Visible = false;
-            _allowLanCheck.Visible = false;
-            _statusLabel.ForeColor = Green;
-            _statusLabel.Text = $"LIVE · {_session.Description} · {EncoderLabel(_session.ActiveEncoder)}   viewers: {b.ViewerCount}   source: {b.SourceFps} fps (dup {b.DupPercent}%)";
+            // A Tailscale address is always reachable (99% path). Otherwise LAN
+            // is reachable only if LAN access was actually applied. With neither,
+            // the stream is up but nobody can reach it — warn instead of green.
+            var addrs = StreamSession.GetShareAddresses(includeLan: true);
+            bool tailscaleReachable = addrs.Any(StreamSession.IsTailscaleAddress);
+            bool lanReachable = !tailscaleReachable && _allowLanApplied
+                && addrs.Any(a => !StreamSession.IsTailscaleAddress(a));
+            if (tailscaleReachable || lanReachable)
+            {
+                _fixPortButton.Visible = false;
+                _allowLanCheck.Visible = false;
+                _statusLabel.ForeColor = Green;
+                string lanTag = tailscaleReachable ? "" : " (LAN)";
+                _statusLabel.Text = $"LIVE{lanTag} · {_session.Description} · {EncoderLabel(_session.ActiveEncoder)}   viewers: {b.ViewerCount}   source: {b.SourceFps} fps (dup {b.DupPercent}%)";
+            }
+            else
+            {
+                _fixPortButton.Visible = true;
+                _allowLanCheck.Visible = true;
+                _statusLabel.ForeColor = Color.Goldenrod;
+                _statusLabel.Text = "LIVE, but no reachable address in the current scope. Start Tailscale, or enable Allow LAN then Fix access.";
+            }
         }
         Text = $"StreamHost - LIVE ({b.ViewerCount} watching)";
     }
@@ -1018,9 +1043,24 @@ public sealed class MainForm : Form
     private string BuildUrl(string pathSuffix)
     {
         // Never hand out a network address the server can't actually answer on.
-        var addrs = StreamSession.GetShareAddresses();
-        string host = _session?.LocalOnly == true ? "localhost"
-            : addrs.Count > 0 ? addrs[0] : "localhost";
+        // Prefer a Tailscale address (in scope in every firewall config); fall
+        // back to a LAN address only if LAN access was actually applied; else
+        // localhost. LocalOnly (no URL ACL) forces localhost regardless.
+        string host;
+        if (_session?.LocalOnly == true)
+            host = "localhost";
+        else
+        {
+            var tailscale = StreamSession.GetShareAddresses(includeLan: false);
+            if (tailscale.Count > 0)
+                host = tailscale[0];
+            else if (_allowLanApplied &&
+                     StreamSession.GetShareAddresses(includeLan: true)
+                         .FirstOrDefault(a => !StreamSession.IsTailscaleAddress(a)) is { } lan)
+                host = lan;
+            else
+                host = "localhost";
+        }
         int port = _livePort > 0 ? _livePort : (int)_portInput.Value;
         string url = $"http://{host}:{port}/{pathSuffix}";
         if (pathSuffix.Length == 0 && _session?.ViewKey is { } key)
@@ -1123,6 +1163,10 @@ public sealed class MainForm : Form
                     _fixingPort = false;
                     if (code == 0)
                     {
+                        // Record the scope that was actually applied — only on
+                        // success, so a declined/failed attempt never widens it.
+                        _allowLanApplied = _allowLanCheck.Checked;
+                        SaveSettings();
                         AppendLog($"Port {port} configured.");
                         if (_session is not null && _lastConfig is not null && !_stopping)
                         {
@@ -1147,20 +1191,28 @@ public sealed class MainForm : Form
     }
 
     /// <summary>The account currently granted this port's URL reservation, or
-    /// null if none is reserved / it can't be read. Parsed from the "User:" line
-    /// of `netsh http show urlacl`; reading it needs no elevation.</summary>
+    /// null if none is reserved / it can't be read. Reading it needs no
+    /// elevation. Fails CLOSED: existence is tested against the reserved URL
+    /// string (which is not localized), so on a non-English Windows where the
+    /// "User:" line is labelled differently, a foreign reservation still returns
+    /// a sentinel — the caller's confirm dialog then fires instead of silently
+    /// replacing it. English systems parse the User: line first, unchanged.</summary>
     private static string? ReadReservationOwner(int port)
     {
         try
         {
             var r = Util.ProcessRunner.Run("netsh", $"http show urlacl url=http://+:{port}/", 5000);
+            bool reserved = r.StdOut.Contains($"http://+:{port}/", StringComparison.OrdinalIgnoreCase);
             foreach (var line in r.StdOut.Split('\n'))
             {
                 int idx = line.IndexOf("User:", StringComparison.OrdinalIgnoreCase);
                 if (idx < 0) continue;
                 string owner = line[(idx + 5)..].Trim();
-                return owner.Length == 0 ? null : owner;
+                if (owner.Length > 0) return owner;
             }
+            // Reserved but the owner line didn't parse (non-English locale): don't
+            // pretend it's ours. A sentinel worded to read well in the dialog.
+            return reserved ? "an account StreamHost could not identify" : null;
         }
         catch { }
         return null;
@@ -1384,6 +1436,8 @@ public sealed class MainForm : Form
             if (!string.IsNullOrWhiteSpace(s.StreamName)) _nameInput.Text = s.StreamName;
             int encIdx = Array.FindIndex(Encoders, e => e.Value == s.Encoder);
             _encoderCombo.SelectedIndex = encIdx >= 0 ? encIdx : 0;
+            _allowLanApplied = s.AllowLan;
+            _allowLanCheck.Checked = s.AllowLan;
             UpdateAudioModeLabel();
         }
         catch { /* corrupted settings are not worth crashing over */ }
@@ -1406,6 +1460,7 @@ public sealed class MainForm : Form
                 Port = (int)_portInput.Value,
                 StreamName = _nameInput.Text.Trim(),
                 Encoder = ((EncoderChoice)_encoderCombo.SelectedItem!).Value,
+                AllowLan = _allowLanApplied,
             };
             Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!);
             // Write to a sibling temp file, then atomically swap it in, so a crash
