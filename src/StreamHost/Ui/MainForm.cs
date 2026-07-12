@@ -1174,14 +1174,22 @@ public sealed class MainForm : Form
         try
         {
             // The tailscale CLI can block for seconds; keep it off the UI thread.
-            string tailnet = await Task.Run(Util.StreamDiscovery.DescribeTailnetPaths);
+            // ffmpeg -version + the binary hash also shell out, so batch them too.
+            string tailnet = await Task.Run(() => RedactPeerNames(Util.StreamDiscovery.DescribeTailnetPaths()));
+            var ffmpeg = await Task.Run(Encode.FfmpegEncoder.FfmpegBuildInfo);
+            var gpu = PrimaryGpu();
             var sb = new System.Text.StringBuilder();
             sb.AppendLine($"StreamHost {AppVersion()}");
             sb.AppendLine($"Windows:  {Environment.OSVersion.VersionString}");
             sb.AppendLine($"GPUs:     {string.Join("; ", GpuAdapters())}");
-            sb.AppendLine($"ffmpeg:   {FfmpegVersionLine()}");
+            sb.AppendLine($"ffmpeg:   {ffmpeg.version}");
+            sb.AppendLine($"ffmpeg build: {ffmpeg.buildconf}");
+            sb.AppendLine($"ffmpeg sha256: {ffmpeg.sha256}");
             sb.AppendLine($"tailnet:  {tailnet}");
             sb.AppendLine($"enc cache: {ReadSmallFile(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "StreamHost", "encoder.cache"))}");
+            // Expected token for the current adapter — a report can compare it to
+            // the cached verdict above to spot a stale probe.
+            sb.AppendLine($"enc expected: {Encode.FfmpegEncoder.ExpectedProbeToken(gpu.vendorId)}  (adapter LUID {gpu.luid}, driver {gpu.driver})");
             sb.AppendLine($"session:  {DescribeSessionState()}");
             sb.AppendLine($"settings: {ReadSmallFile(SettingsPath)}");
             sb.AppendLine("---- last 200 log lines ----");
@@ -1189,9 +1197,15 @@ public sealed class MainForm : Form
             // does not), which is what makes a stall report diagnosable.
             string[] lines = ReadLogTail(200) ?? _logBox.Lines;
             foreach (string line in lines.Skip(Math.Max(0, lines.Length - 200)))
-                sb.AppendLine(RedactKey(line));
-            Clipboard.SetText(sb.ToString());
-            AppendLog("Log copied (with version, system, and encoder info) — paste it into a bug report.");
+                sb.AppendLine(line);
+            // Scrub the WHOLE blob in one place — keys, Tailscale IPs, and the
+            // username/paths across every line — right before it hits the
+            // clipboard and, from there, a public issue. The live keys are passed
+            // as exact secrets so a raw key without a ?k= wrapper is caught too.
+            string scrubbed = Util.BundleScrubber.Scrub(sb.ToString(),
+                new[] { _session?.ViewKey, _lastConfig?.ViewKey });
+            Clipboard.SetText(scrubbed);
+            AppendLog("Log copied (scrubbed, with version, system, and encoder info) — paste it into a bug report.");
         }
         catch (Exception ex)
         {
@@ -1247,7 +1261,7 @@ public sealed class MainForm : Form
                 {
                     var d = adapter!.Description1;
                     if ((d.Flags & Vortice.DXGI.AdapterFlags.Software) == 0)
-                        list.Add($"{d.Description} (vendor 0x{d.VendorId:X4})");
+                        list.Add($"{d.Description} (vendor 0x{d.VendorId:X4}, driver {AdapterDriver(adapter)})");
                 }
             }
         }
@@ -1256,22 +1270,64 @@ public sealed class MainForm : Form
         return list;
     }
 
-    private static string FfmpegVersionLine()
+    /// <summary>Best-effort UMD driver version for a DXGI adapter, decoded from the
+    /// packed CheckInterfaceSupport long (same layout as the capture init log).
+    /// Diagnostics only — never throws; returns "?" when unavailable.</summary>
+    private static string AdapterDriver(Vortice.DXGI.IDXGIAdapter1 adapter)
     {
         try
         {
-            // Runner adopts + tree-kills on timeout, so a hung "-version" can't leak.
-            var r = Util.ProcessRunner.Run(Encode.FfmpegEncoder.FfmpegPath, "-version", 3000);
-            if (r.TimedOut) return "timed out";
-            // Support bundle only wants the version line; keep the first non-empty one.
-            foreach (string line in r.StdOut.Split('\n'))
-                if (line.Trim().Length > 0) return line.Trim();
-            return "no output";
+            if (adapter.CheckInterfaceSupport(typeof(Vortice.DXGI.IDXGIDevice), out long umd))
+                return $"{(umd >> 48) & 0xFFFF}.{(umd >> 32) & 0xFFFF}.{(umd >> 16) & 0xFFFF}.{umd & 0xFFFF}";
         }
-        catch (Exception ex)
+        catch { }
+        return "?";
+    }
+
+    /// <summary>Identity of the first hardware adapter (vendor id, LUID, driver)
+    /// for the probe-cache fingerprint. Diagnostics only — never throws; returns
+    /// zero/"?" placeholders when DXGI can't be read.</summary>
+    private static (uint vendorId, string luid, string driver) PrimaryGpu()
+    {
+        try
         {
-            return $"not runnable ({ex.Message})";
+            using var factory = Vortice.DXGI.DXGI.CreateDXGIFactory1<Vortice.DXGI.IDXGIFactory1>();
+            for (uint i = 0; factory.EnumAdapters1(i, out Vortice.DXGI.IDXGIAdapter1? adapter).Success; i++)
+            {
+                using (adapter)
+                {
+                    var d = adapter!.Description1;
+                    if ((d.Flags & Vortice.DXGI.AdapterFlags.Software) != 0) continue;
+                    return ((uint)d.VendorId, $"{d.Luid.HighPart}:{d.Luid.LowPart}", AdapterDriver(adapter));
+                }
+            }
         }
+        catch { }
+        return (0, "?", "?");
+    }
+
+    /// <summary>Genericizes remote peer HOSTNAMES in the tailnet line (friends'
+    /// machine names) to peer1/peer2/... while keeping each direct/relay/idle path
+    /// token — the diagnostic value is the path mix, not the names. Status messages
+    /// like "tailscale not running (state: ...)" have no name: path rows and pass
+    /// through untouched. Applied here, not in DescribeTailnetPaths, so its other
+    /// callers still see the real names.</summary>
+    private static string RedactPeerNames(string tailnet)
+    {
+        if (string.IsNullOrEmpty(tailnet)) return tailnet;
+        var entries = tailnet.Split(", ");
+        int n = 0;
+        for (int i = 0; i < entries.Length; i++)
+        {
+            int sep = entries[i].IndexOf(": ", StringComparison.Ordinal);
+            if (sep < 0) continue;
+            string path = entries[i][(sep + 2)..];
+            // Only rewrite genuine "name: path" rows; leave any status text alone.
+            if (path.StartsWith("direct") || path.StartsWith("idle")
+                || path.StartsWith("relay") || path.StartsWith("unknown"))
+                entries[i] = $"peer{++n}: {path}";
+        }
+        return string.Join(", ", entries);
     }
 
     private static string ReadSmallFile(string path)

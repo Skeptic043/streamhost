@@ -142,13 +142,7 @@ public sealed class FfmpegEncoder : IDisposable
     {
         if (!string.IsNullOrEmpty(requested) && requested != "auto") return requested;
 
-        string preferred = gpuVendorId switch
-        {
-            0x10DE => "h264_nvenc",
-            0x1002 => "h264_amf",
-            0x8086 => "h264_qsv",
-            _ => "libx264",
-        };
+        string preferred = PreferredEncoder(gpuVendorId);
 
         if (preferred == "libx264") return preferred;
 
@@ -156,12 +150,7 @@ public sealed class FfmpegEncoder : IDisposable
         // Failures are deliberately not cached — a driver hiccup shouldn't
         // condemn the machine to CPU encoding forever.
         string cachePath = CachePath;
-        // Cache token version: bump when the probe changes so stale "passed"
-        // verdicts (e.g. an AMD card that cleared the old trivial 320x240 test
-        // but stalls on real content) get re-evaluated.
-        // v3: probe now uses the real encoder options (EncoderOpts) and AMF
-        // dropped -usage lowlatency — every machine re-probes the new config.
-        string token = $"v3:{gpuVendorId:X}:{preferred}";
+        string token = ExpectedProbeToken(gpuVendorId);
         try
         {
             if (File.Exists(cachePath) && File.ReadAllText(cachePath).Trim() == token)
@@ -182,6 +171,70 @@ public sealed class FfmpegEncoder : IDisposable
         }
         catch { }
         return preferred;
+    }
+
+    /// <summary>The hardware encoder this GPU vendor prefers, or "libx264" for
+    /// unknown/other vendors. Single source of truth for both PickEncoder and the
+    /// probe-cache token so the two can never drift.</summary>
+    private static string PreferredEncoder(uint gpuVendorId) => gpuVendorId switch
+    {
+        0x10DE => "h264_nvenc",
+        0x1002 => "h264_amf",
+        0x8086 => "h264_qsv",
+        _ => "libx264",
+    };
+
+    /// <summary>The probe-cache token PickEncoder would expect for this GPU right
+    /// now, in the exact form it writes to encoder.cache. A support bundle prints
+    /// this next to the cached file so a report shows whether the cached "passed"
+    /// verdict still matches the current adapter.
+    /// Token version: bump when the probe changes so stale "passed" verdicts
+    /// (e.g. an AMD card that cleared the old trivial 320x240 test but stalls on
+    /// real content) get re-evaluated. v3: probe now uses the real encoder options
+    /// (EncoderOpts) and AMF dropped -usage lowlatency.</summary>
+    public static string ExpectedProbeToken(uint gpuVendorId) =>
+        $"v3:{gpuVendorId:X}:{PreferredEncoder(gpuVendorId)}";
+
+    /// <summary>Version line, full build configuration, and a short binary hash of
+    /// the ffmpeg at <see cref="FfmpegPath"/>. Reusable by the support bundle (and
+    /// later probe diagnostics). Best-effort: every field degrades to a short note
+    /// rather than throwing. The runner adopts + tree-kills on timeout, so a hung
+    /// "-version" can't leak.</summary>
+    public static (string version, string buildconf, string sha256) FfmpegBuildInfo()
+    {
+        string version = "unknown", buildconf = "unknown";
+        try
+        {
+            var r = Util.ProcessRunner.Run(FfmpegPath, "-version", 3000);
+            if (r.TimedOut) { version = buildconf = "timed out"; }
+            else
+            {
+                foreach (string line in r.StdOut.Split('\n'))
+                {
+                    string t = line.Trim();
+                    if (t.Length == 0) continue;
+                    if (version == "unknown") version = t; // first non-empty line is the version
+                    if (t.StartsWith("configuration:", StringComparison.OrdinalIgnoreCase))
+                        buildconf = t["configuration:".Length..].Trim();
+                }
+                if (version == "unknown") version = "no output";
+            }
+        }
+        catch (Exception ex) { version = buildconf = $"not runnable ({ex.Message})"; }
+
+        string sha256 = "?";
+        try
+        {
+            if (File.Exists(FfmpegPath))
+            {
+                using var fs = File.OpenRead(FfmpegPath);
+                sha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(fs))[..16].ToLowerInvariant();
+            }
+            else sha256 = "(resolved via PATH, not hashed)";
+        }
+        catch (Exception ex) { sha256 = $"unreadable ({ex.Message})"; }
+
+        return (version, buildconf, sha256);
     }
 
     /// <summary>Encodes a second of realistic 1080p60 motion with the SAME encoder
