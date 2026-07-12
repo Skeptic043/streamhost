@@ -22,11 +22,16 @@ namespace StreamHost.Audio;
 /// fought the idle fill and produced choppy audio.
 ///
 /// The WASAPI drain loop never blocks on the consumer: samples go through a
-/// bounded queue to a writer thread, and overflow (encoder not draining) is
-/// bridged with silence rather than back-pressure, again to protect the clock.
-/// A starved drain loop injecting silence into otherwise-fine audio was the
-/// original choppiness; the highest-priority thread plus the non-blocking
-/// queue removes that failure mode.
+/// bounded queue to a writer thread. On overflow (encoder not draining) the
+/// newest packet is always queued first; if the queue is full the OLDEST
+/// queued block is dropped so playback resumes near the live edge, and the
+/// dropped span is owed back as a BOUNDED amount of silence (freshness wins
+/// over preserving every byte). Prioritizing silence-debt ahead of fresh
+/// audio was what let a transient stall become permanent silence; queuing
+/// fresh first and capping the debt removes that. A starved drain loop
+/// injecting silence into otherwise-fine audio was the original choppiness;
+/// the highest-priority thread (MMCSS Pro Audio when available) plus the
+/// non-blocking queue removes that failure mode.
 /// Discord (a different process tree) is excluded by construction.
 /// </summary>
 public sealed class ProcessAudioCapture : IDisposable
@@ -36,6 +41,7 @@ public sealed class ProcessAudioCapture : IDisposable
     private const int BytesPerFrame = Channels * 4;
 
     private static readonly byte[] SilenceBlock = new byte[SampleRate * BytesPerFrame / 100]; // 10 ms
+    private const long MaxOverflowBytes = SampleRate * BytesPerFrame / 4; // 250 ms — bound on owed silence; freshness wins over preserving every byte
 
     private readonly IAudioClient _client;
     private readonly IAudioCaptureClient _capture;
@@ -53,130 +59,187 @@ public sealed class ProcessAudioCapture : IDisposable
         _onSamples = onSamples;
         _client = ActivateProcessLoopback(targetPid);
 
-        var format = new WAVEFORMATEX
+        // REL-2: everything past activation is transactional. If format setup,
+        // Initialize, GetService, or Start throws, release the client before
+        // rethrowing — otherwise a half-built capture leaks it and its threads
+        // never start to be disposed.
+        try
         {
-            wFormatTag = 3, // WAVE_FORMAT_IEEE_FLOAT
-            nChannels = Channels,
-            nSamplesPerSec = SampleRate,
-            wBitsPerSample = 32,
-            nBlockAlign = BytesPerFrame,
-            nAvgBytesPerSec = SampleRate * BytesPerFrame,
-            cbSize = 0,
-        };
+            var format = new WAVEFORMATEX
+            {
+                wFormatTag = 3, // WAVE_FORMAT_IEEE_FLOAT
+                nChannels = Channels,
+                nSamplesPerSec = SampleRate,
+                wBitsPerSample = 32,
+                nBlockAlign = BytesPerFrame,
+                nAvgBytesPerSec = SampleRate * BytesPerFrame,
+                cbSize = 0,
+            };
 
-        const uint AUDCLNT_STREAMFLAGS_LOOPBACK = 0x00020000;
-        // 500 ms: must comfortably exceed the idle-fill threshold plus worst-case
-        // scheduling starvation, or WASAPI overwrites data before we drain it.
-        const long bufferDuration100ns = 5_000_000;
-        int hr = _client.Initialize(0 /*shared*/, AUDCLNT_STREAMFLAGS_LOOPBACK,
-            bufferDuration100ns, 0, ref format, IntPtr.Zero);
-        Marshal.ThrowExceptionForHR(hr);
+            const uint AUDCLNT_STREAMFLAGS_LOOPBACK = 0x00020000;
+            // 500 ms: must comfortably exceed the idle-fill threshold plus worst-case
+            // scheduling starvation, or WASAPI overwrites data before we drain it.
+            const long bufferDuration100ns = 5_000_000;
+            int hr = _client.Initialize(0 /*shared*/, AUDCLNT_STREAMFLAGS_LOOPBACK,
+                bufferDuration100ns, 0, ref format, IntPtr.Zero);
+            Marshal.ThrowExceptionForHR(hr);
 
-        var captureIid = typeof(IAudioCaptureClient).GUID;
-        Marshal.ThrowExceptionForHR(_client.GetService(ref captureIid, out IntPtr capturePtr));
-        _capture = (IAudioCaptureClient)Marshal.GetObjectForIUnknown(capturePtr);
-        Marshal.Release(capturePtr);
+            var captureIid = typeof(IAudioCaptureClient).GUID;
+            Marshal.ThrowExceptionForHR(_client.GetService(ref captureIid, out IntPtr capturePtr));
+            _capture = (IAudioCaptureClient)Marshal.GetObjectForIUnknown(capturePtr);
+            Marshal.Release(capturePtr);
 
-        Marshal.ThrowExceptionForHR(_client.Start());
+            Marshal.ThrowExceptionForHR(_client.Start());
+        }
+        catch { try { Marshal.FinalReleaseComObject(_client); } catch { } throw; }
+
         _writerThread = new Thread(WriteLoop) { IsBackground = true, Name = "audio-writer", Priority = ThreadPriority.AboveNormal };
         _writerThread.Start();
         // Highest: on a machine pegged by the game, a starved drain loop is
         // exactly what used to inject spurious silence into the stream.
         _thread = new Thread(CaptureLoop) { IsBackground = true, Name = "audio-capture", Priority = ThreadPriority.Highest };
         _thread.Start();
+        // REL-1: one line so a live session shows audio actually came up. MMCSS
+        // is best-effort (Part 4) — it may have fallen back to thread priority.
+        Console.WriteLine("[audio] capture started (process loopback, 48 kHz stereo, MMCSS Pro Audio)");
     }
 
     private void CaptureLoop()
     {
-        long written = 0;              // frames emitted (real + idle silence) — the stream clock
-        bool overflowLogged = false, errorLogged = false;
-
-        long lastPacketTicks = Stopwatch.GetTimestamp();
-        long idleAfterTicks = Stopwatch.Frequency * 150 / 1000; // no packets at all for 150 ms = app stopped rendering
-        bool idle = false;
-        long idleAnchorWritten = 0, idleAnchorTicks = 0;
-
-        while (!_cts.IsCancellationRequested)
+        // REL-3: MMCSS "Pro Audio" is the OS's realtime-audio scheduling class;
+        // fully guarded (Part 4), so any failure silently keeps ThreadPriority.Highest.
+        IntPtr mmcss = ConfigureMmcss();
+        try
         {
-            bool got = false;
-            while (true)
+            long written = 0;              // frames emitted (real + idle silence) — the stream clock
+            bool overflowLogged = false, errorLogged = false;
+
+            long lastPacketTicks = Stopwatch.GetTimestamp();
+            long idleAfterTicks = Stopwatch.Frequency * 150 / 1000; // no packets at all for 150 ms = app stopped rendering
+            bool idle = false;
+            long idleAnchorWritten = 0, idleAnchorTicks = 0;
+
+            while (!_cts.IsCancellationRequested)
             {
-                int hr = _capture.GetNextPacketSize(out uint packetFrames);
-                if (hr < 0 || packetFrames == 0)
+                bool got = false;
+                while (true)
                 {
-                    if (hr < 0 && !errorLogged)
+                    int hr = _capture.GetNextPacketSize(out uint packetFrames);
+                    if (hr < 0 || packetFrames == 0)
                     {
-                        errorLogged = true;
-                        Console.Error.WriteLine($"[audio] capture read failed (0x{hr:X8}) — stream continues with silence.");
+                        if (hr < 0 && !errorLogged)
+                        {
+                            errorLogged = true;
+                            Console.Error.WriteLine($"[audio] capture read failed (0x{hr:X8}) — stream continues with silence.");
+                        }
+                        break;
                     }
-                    break;
+
+                    if (_capture.GetBuffer(out IntPtr data, out uint frames, out uint flags, out _, out _) < 0) break;
+                    // HP-04: ReleaseBuffer must run even if alloc/Marshal.Copy/Emit
+                    // throws, or the WASAPI buffer leaks and capture wedges.
+                    try
+                    {
+                        got = true;
+
+                        // Emit every real packet, silent-flagged or not — a silent packet
+                        // is real render time and keeps the clock advancing without any
+                        // idle fill. Copy only when it carries actual samples.
+                        int bytes = (int)frames * BytesPerFrame;
+                        var buf = new byte[bytes];
+                        const uint AUDCLNT_BUFFERFLAGS_SILENT = 0x2;
+                        if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) == 0)
+                            Marshal.Copy(data, buf, 0, bytes);
+                        Emit(buf, bytes, ref overflowLogged);
+                        written += frames;
+                    }
+                    finally { _capture.ReleaseBuffer(frames); }
                 }
 
-                if (_capture.GetBuffer(out IntPtr data, out uint frames, out uint flags, out _, out _) < 0) break;
-                got = true;
-
-                // Emit every real packet, silent-flagged or not — a silent packet
-                // is real render time and keeps the clock advancing without any
-                // idle fill. Copy only when it carries actual samples.
-                int bytes = (int)frames * BytesPerFrame;
-                var buf = new byte[bytes];
-                const uint AUDCLNT_BUFFERFLAGS_SILENT = 0x2;
-                if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) == 0)
-                    Marshal.Copy(data, buf, 0, bytes);
-                _capture.ReleaseBuffer(frames);
-                Emit(buf, bytes, ref overflowLogged);
-                written += frames;
-            }
-
-            long now = Stopwatch.GetTimestamp();
-            if (got)
-            {
-                lastPacketTicks = now;
-                idle = false;
-            }
-            else if (now - lastPacketTicks > idleAfterTicks)
-            {
-                // The app isn't rendering audio at all: fill silence from the
-                // moment packets stopped so the muxer's audio timeline keeps up
-                // with video. Anchored at lastPacketTicks (not stream start) so
-                // the fill measures only this gap and can't drift.
-                if (!idle)
+                long now = Stopwatch.GetTimestamp();
+                if (got)
                 {
-                    idle = true;
-                    idleAnchorWritten = written;
-                    idleAnchorTicks = lastPacketTicks;
+                    lastPacketTicks = now;
+                    idle = false;
                 }
-                long targetFrames = idleAnchorWritten + (now - idleAnchorTicks) * SampleRate / Stopwatch.Frequency;
-                if (targetFrames > written)
+                else if (now - lastPacketTicks > idleAfterTicks)
                 {
-                    EmitSilence((targetFrames - written) * BytesPerFrame);
-                    written = targetFrames;
+                    // The app isn't rendering audio at all: fill silence from the
+                    // moment packets stopped so the muxer's audio timeline keeps up
+                    // with video. Anchored at lastPacketTicks (not stream start) so
+                    // the fill measures only this gap and can't drift.
+                    if (!idle)
+                    {
+                        idle = true;
+                        idleAnchorWritten = written;
+                        idleAnchorTicks = lastPacketTicks;
+                    }
+                    long targetFrames = idleAnchorWritten + (now - idleAnchorTicks) * SampleRate / Stopwatch.Frequency;
+                    if (targetFrames > written)
+                    {
+                        EmitSilence((targetFrames - written) * BytesPerFrame);
+                        written = targetFrames;
+                    }
                 }
-            }
 
-            Thread.Sleep(4);
+                Thread.Sleep(4);
+            }
         }
+        catch (Exception ex)
+        {
+            // HP-04 / REL-1: an unhandled capture error ends this thread cleanly
+            // and logs it. The mux-liveness cap keeps video going without audio.
+            Console.Error.WriteLine($"[audio] capture thread stopped on error ({ex.Message}) — video continues without audio.");
+        }
+        finally { RevertMmcss(mmcss); }
+    }
+
+    /// <summary>Completion-tolerant add: a late CompleteAdding during shutdown
+    /// must not throw on the producer thread. Every producer add goes through here.</summary>
+    private bool TryEnqueue((byte[] Buffer, int Length) item)
+    {
+        try { return _queue.TryAdd(item); }
+        catch (InvalidOperationException) { return false; } // collection completed during shutdown
+    }
+
+    /// <summary>Accrue owed silence, bounded — freshness wins over preserving every byte.</summary>
+    private void OweSilence(long bytes) => _overflowBytes = Math.Min(_overflowBytes + bytes, MaxOverflowBytes);
+
+    // Repay at most ONE silence block, and only when the queue accepts it, so
+    // silence-debt catch-up can never displace imminent fresh audio.
+    private void RepayDebtBounded()
+    {
+        if (_overflowBytes <= 0) return;
+        int chunk = (int)Math.Min(_overflowBytes, SilenceBlock.Length);
+        if (TryEnqueue((SilenceBlock, chunk))) _overflowBytes -= chunk;
     }
 
     /// <summary>Hand samples to the writer queue; a stalled consumer costs audio
     /// content (replaced by silence later), never timeline bytes.</summary>
     private void Emit(byte[] buf, int len, ref bool overflowLogged)
     {
-        // Pay back dropped spans first so the byte count stays a clock.
-        while (_overflowBytes > 0)
+        // Freshness wins (review RB-01): queue the newest audio before any silence
+        // repayment. Repaying debt ahead of fresh samples was what let a transient
+        // encoder stall turn into permanent silence.
+        if (TryEnqueue((buf, len))) { RepayDebtBounded(); return; }
+
+        // Queue full => the encoder is behind. Discard the OLDEST queued block so we
+        // resume near the live edge (a live stream must not replay a stale backlog and
+        // then desync), admit the fresh block in its place, and owe the discarded span
+        // back as bounded silence to hold the A/V byte-clock.
+        if (_queue.TryTake(out var stale))
         {
-            int chunk = (int)Math.Min(_overflowBytes, SilenceBlock.Length);
-            if (!_queue.TryAdd((SilenceBlock, chunk))) break;
-            _overflowBytes -= chunk;
+            OweSilence(stale.Length);
+            if (!TryEnqueue((buf, len))) OweSilence(len); // lost the freed slot to the writer
         }
-        if (!_queue.TryAdd((buf, len)))
+        else if (!TryEnqueue((buf, len)))
         {
-            if (_overflowBytes == 0 && !overflowLogged)
-            {
-                overflowLogged = true;
-                Console.Error.WriteLine("[audio] encoder is not draining audio — bridging with silence to keep A/V sync.");
-            }
-            _overflowBytes += len;
+            OweSilence(len);
+        }
+        if (!overflowLogged)
+        {
+            overflowLogged = true;
+            Console.Error.WriteLine("[audio] encoder is not draining audio — dropping stale audio to stay at the live edge.");
         }
     }
 
@@ -185,7 +248,7 @@ public sealed class ProcessAudioCapture : IDisposable
         while (bytes > 0 && !_cts.IsCancellationRequested)
         {
             int chunk = (int)Math.Min(bytes, SilenceBlock.Length);
-            if (!_queue.TryAdd((SilenceBlock, chunk))) { _overflowBytes += bytes; return; }
+            if (!TryEnqueue((SilenceBlock, chunk))) { OweSilence(bytes); return; }
             bytes -= chunk;
         }
     }
@@ -219,6 +282,8 @@ public sealed class ProcessAudioCapture : IDisposable
 
         int size = Marshal.SizeOf<AUDIOCLIENT_ACTIVATION_PARAMS>();
         IntPtr paramsPtr = Marshal.AllocHGlobal(size);
+        ActivationHandler? handler = null;
+        IActivateAudioInterfaceAsyncOperation? op = null;
         try
         {
             Marshal.StructureToPtr(activationParams, paramsPtr, false);
@@ -229,10 +294,10 @@ public sealed class ProcessAudioCapture : IDisposable
                 blobData = paramsPtr,
             };
 
-            var handler = new ActivationHandler();
+            handler = new ActivationHandler();
             var audioClientIid = typeof(IAudioClient).GUID;
             int hr = ActivateAudioInterfaceAsync(
-                "VAD\\Process_Loopback", ref audioClientIid, ref propvariant, handler, out IActivateAudioInterfaceAsyncOperation op);
+                "VAD\\Process_Loopback", ref audioClientIid, ref propvariant, handler, out op);
             Marshal.ThrowExceptionForHR(hr);
 
             if (!handler.Done.WaitOne(TimeSpan.FromSeconds(5)))
@@ -244,6 +309,10 @@ public sealed class ProcessAudioCapture : IDisposable
         }
         finally
         {
+            // Release the wait-handle and the async-operation COM object too — the
+            // op is a distinct COM object, so this can't affect the returned client.
+            handler?.Done.Dispose();
+            if (op is not null) { try { Marshal.FinalReleaseComObject(op); } catch { } }
             Marshal.FreeHGlobal(paramsPtr);
         }
     }
@@ -254,14 +323,40 @@ public sealed class ProcessAudioCapture : IDisposable
         public void ActivateCompleted(IActivateAudioInterfaceAsyncOperation op) => Done.Set();
     }
 
+    private bool _disposed;
     public void Dispose()
     {
+        if (_disposed) return; // session teardown guard may also call this
+        _disposed = true;
         _cts.Cancel();
-        _thread.Join(1000);
-        _queue.CompleteAdding();
-        _writerThread.Join(1000); // may still be blocked on the pipe; disposing the pipe frees it
+        // Stop the WASAPI client first so the capture thread's reads drain and it
+        // exits promptly; only then complete the queue (producer is done — TryEnqueue
+        // also tolerates a late completion as a belt) and join the writer.
         try { _client.Stop(); } catch { }
+        _thread.Join(2000);
+        _queue.CompleteAdding();
+        _writerThread.Join(2000); // a writer blocked in the pipe is freed when the session disposes the pipe
+        try { Marshal.FinalReleaseComObject(_capture); } catch { }
+        try { Marshal.FinalReleaseComObject(_client); } catch { }
         _cts.Dispose();
+    }
+
+    // ---- MMCSS (realtime scheduling, best-effort) -----------------------
+
+    [DllImport("avrt.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr AvSetMmThreadCharacteristicsW(string taskName, ref uint taskIndex);
+    [DllImport("avrt.dll", SetLastError = true)]
+    private static extern bool AvRevertMmThreadCharacteristics(IntPtr avrtHandle);
+
+    private static IntPtr ConfigureMmcss()
+    {
+        try { uint idx = 0; return AvSetMmThreadCharacteristicsW("Pro Audio", ref idx); }
+        catch { return IntPtr.Zero; }
+    }
+    private static void RevertMmcss(IntPtr handle)
+    {
+        if (handle == IntPtr.Zero) return;
+        try { AvRevertMmThreadCharacteristics(handle); } catch { }
     }
 
     // ---- interop definitions --------------------------------------------
