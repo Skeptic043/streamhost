@@ -27,6 +27,9 @@ Copy-Item $ffmpeg dist/StreamHost/ffmpeg.exe -Force
 
 Write-Host "Recording build info..."
 $ffmpegVersionLine = (& dist/StreamHost/ffmpeg.exe -version | Select-Object -First 1)
+$ffmpegBuildconf = ""
+$ffmpegBuildconfLine = (& dist/StreamHost/ffmpeg.exe -version | Select-String -SimpleMatch 'configuration:' | Select-Object -First 1)
+if ($ffmpegBuildconfLine) { $ffmpegBuildconf = $ffmpegBuildconfLine.ToString().Trim() }
 $ffmpegHash = (Get-FileHash dist/StreamHost/ffmpeg.exe -Algorithm SHA256).Hash
 $buildDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss 'UTC'")
 $buildInfo = @(
@@ -36,10 +39,56 @@ $buildInfo = @(
     "ffmpeg version: $ffmpegVersionLine"
     "ffmpeg SHA256: $ffmpegHash"
 )
+if (-not [string]::IsNullOrWhiteSpace($ffmpegBuildconf)) {
+    $buildInfo += "ffmpeg buildconf: $ffmpegBuildconf"
+}
 Set-Content -Path dist/StreamHost/build-info.txt -Value $buildInfo
 
 Write-Host "Adding scripts + README..."
 Copy-Item packaging/setup.bat, packaging/start-stream.bat, packaging/README.txt dist/StreamHost/ -Force
+
+Write-Host "Adding license + third-party notices..."
+# StreamHost's own license, .txt so double-click opens it in Notepad.
+Copy-Item LICENSE dist/StreamHost/LICENSE.txt -Force
+
+# Generated at package time so it describes the actual bundled ffmpeg.exe.
+# Derive ffmpeg's license from its build configuration (captured above).
+if ([string]::IsNullOrWhiteSpace($ffmpegBuildconf)) {
+    $ffmpegLicenseLine = "FFmpeg is used here under the GNU Lesser General Public License (LGPL) version 2.1 or later. (The ffmpeg build configuration could not be read at package time, so this is the conservative default.)"
+    $isGpl = $false
+} elseif ($ffmpegBuildconf -like '*--enable-gpl*') {
+    $ffmpegLicenseLine = "FFmpeg is used here under the GNU General Public License (GPL) version 3 or later."
+    $isGpl = $true
+} elseif ($ffmpegBuildconf -like '*--enable-version3*') {
+    $ffmpegLicenseLine = "FFmpeg is used here under the GNU Lesser General Public License (LGPL) version 3 or later."
+    $isGpl = $false
+} else {
+    $ffmpegLicenseLine = "FFmpeg is used here under the GNU Lesser General Public License (LGPL) version 2.1 or later."
+    $isGpl = $false
+}
+
+$notice = @(
+    "StreamHost third-party notices"
+    ""
+    "StreamHost bundles FFmpeg as ffmpeg.exe. FFmpeg is a separate project with"
+    "its own authors and license, listed below."
+    ""
+    "ffmpeg version: $ffmpegVersionLine"
+    "ffmpeg SHA256: $ffmpegHash"
+    ""
+    $ffmpegLicenseLine
+)
+if ($isGpl) {
+    $notice += ""
+    $notice += "The corresponding FFmpeg source code is available from ffmpeg.org and from the build provider."
+}
+$notice += ""
+$notice += "FFmpeg project: https://ffmpeg.org"
+$notice += "FFmpeg source: https://ffmpeg.org/download.html"
+$notice += "FFmpeg license details: https://ffmpeg.org/legal.html"
+$notice += ""
+$notice += "StreamHost itself is licensed separately under the PolyForm Noncommercial License. See LICENSE.txt."
+Set-Content -Path dist/StreamHost/THIRD-PARTY-NOTICES.txt -Value $notice
 
 # Publish drops debug symbols we don't need to ship
 Remove-Item dist/StreamHost/*.pdb -ErrorAction SilentlyContinue

@@ -25,6 +25,7 @@ public sealed class FfmpegEncoder : IDisposable
         int outWidth, int outHeight, string encoder, string? audioPipeName = null,
         int fragMs = 0)
     {
+        LogBuildInfoOnce(); // first stream start records the exact bundled ffmpeg to the log
         EncoderName = encoder;
         int gop = Math.Max(fps / 2, 1);              // keyframe every 0.5 s => fast late-join/resync
         long fragUs = fragMs > 0 ? fragMs * 1000L    // batched fragments (fewer, larger MSE appends)
@@ -235,6 +236,33 @@ public sealed class FfmpegEncoder : IDisposable
         catch (Exception ex) { sha256 = $"unreadable ({ex.Message})"; }
 
         return (version, buildconf, sha256);
+    }
+
+    private static readonly object _buildInfoLogLock = new();
+    private static bool _buildInfoLogged;
+
+    /// <summary>Logs the exact bundled ffmpeg (version, full build configuration,
+    /// short hash) to the Console once per process, so the on-disk log and the
+    /// support bundle capture which binary actually ran. Called at the top of the
+    /// ctor; the once-guard means fallback restarts (a fresh encoder per attempt)
+    /// don't spam the log. Best-effort: FfmpegBuildInfo already degrades to notes
+    /// rather than throwing, and this whole method is wrapped so it can never throw
+    /// out of the ctor.</summary>
+    public static void LogBuildInfoOnce()
+    {
+        lock (_buildInfoLogLock)
+        {
+            if (_buildInfoLogged) return;
+            _buildInfoLogged = true;
+        }
+        try
+        {
+            var (version, buildconf, sha256) = FfmpegBuildInfo();
+            Console.WriteLine($"[encoder] ffmpeg {version}");
+            Console.WriteLine($"[encoder] ffmpeg buildconf: {buildconf}");
+            Console.WriteLine($"[encoder] ffmpeg sha256: {sha256}");
+        }
+        catch { }
     }
 
     /// <summary>Encodes a second of realistic 1080p60 motion with the SAME encoder
