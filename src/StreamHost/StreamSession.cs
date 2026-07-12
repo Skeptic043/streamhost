@@ -43,12 +43,14 @@ public sealed record SessionConfig
     /// Sees exclusive-fullscreen games (which freeze under WGC) but omits the cursor.</summary>
     public bool CompatibilityCapture { get; init; }
 
-    /// <summary>Short random viewer key for the ?k= link parameter.</summary>
+    /// <summary>Random viewer key for the ?k= link parameter: 16 random bytes
+    /// (~128-bit) encoded base64url with no padding, so it is URL-safe raw
+    /// (no +, /, or = to encode) and round-trips through the link untouched.</summary>
     public static string NewViewKey()
     {
-        const string chars = "abcdefghjkmnpqrstuvwxyz23456789";
-        byte[] bytes = System.Security.Cryptography.RandomNumberGenerator.GetBytes(8);
-        return new string(bytes.Select(b => chars[b % chars.Length]).ToArray());
+        byte[] bytes = System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);
+        return Convert.ToBase64String(bytes)
+            .Replace('+', '-').Replace('/', '_').TrimEnd('=');
     }
 }
 

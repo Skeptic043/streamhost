@@ -146,6 +146,7 @@ function render() {
     open.textContent = "open ↗";
     open.href = url;
     open.target = "_blank";
+    open.rel = "noopener noreferrer";
     bar.appendChild(open);
 
     const remove = document.createElement("button");
@@ -154,13 +155,9 @@ function render() {
     remove.onclick = () => { save(load().filter(u => u !== url)); render(); };
     bar.appendChild(remove);
 
-    const frame = document.createElement("iframe");
-    frame.src = url;
-    frame.allow = "autoplay; fullscreen";
-    frame.allowFullscreen = true;
-
+    // The iframe is NOT embedded here — poll() adds it only once the endpoint
+    // validates as a StreamHost. Until then the tile shows just its bar.
     tile.appendChild(bar);
-    tile.appendChild(frame);
     grid.appendChild(tile);
   }
   fixSpans();
@@ -214,13 +211,31 @@ window.addStream = function (u) {
   return true;
 };
 
+// Embed a tile's player iframe once its host has validated as a StreamHost.
+// Sandboxed to allow-scripts (MSE playback JS) + allow-same-origin (its WebSocket
+// to /ws and fetch to /api/stats must stay same-origin to the remote host);
+// every other capability — top-navigation, popups, downloads, form submits — is
+// withheld by leaving the rest of the sandbox tokens off.
+function embed(tile) {
+  if (tile.querySelector("iframe")) return;
+  const frame = document.createElement("iframe");
+  frame.setAttribute("sandbox", "allow-scripts allow-same-origin");
+  frame.allow = "autoplay; fullscreen";
+  frame.allowFullscreen = true;
+  frame.src = tile.dataset.url;
+  tile.appendChild(frame);
+}
+
 function poll() {
   for (const tile of grid.children) {
     const url = tile.dataset.url;
     fetch(new URL("api/stats", url), { signal: AbortSignal.timeout(3000) })
       .then(r => r.json())
       .then(s => {
-        // "Responded" is not "live": require the host's own health state.
+        // "Responded" is not "live", and a bare 200 from some other server on
+        // this port is not a StreamHost at all — require the host's own state
+        // field before trusting the endpoint enough to embed it.
+        if (typeof s.state !== "string") throw new Error("not a streamhost");
         const live = s.state === "live";
         tile.classList.toggle("live", live);
         tile.querySelector(".name").textContent = s.name || url;
@@ -229,14 +244,26 @@ function poll() {
           : s.state === "idle" ? "not streaming yet"
           : (s.state || "not streaming");
         // Hosts hand the current viewer key to tailnet/local callers; a restart
-        // rotates it, so refresh the saved link when it changes (reloads the tile).
-        if (s.key && new URL(url).searchParams.get("k") !== s.key)
+        // rotates it, so refresh the saved link when it changes. addStream
+        // re-renders the tile and the next poll re-embeds it with the new key.
+        if (s.key && new URL(url).searchParams.get("k") !== s.key) {
           window.addStream(new URL(url).origin + "/?k=" + encodeURIComponent(s.key));
-        // A tile opened while its host wasn't streaming sits on the browser's
-        // own error page, where no script of ours runs — reload the iframe when
-        // the host comes back. Two missed polls required so a single stats
-        // timeout on a congested link can't restart healthy playback (the key
-        // check above already covers restarts, but not --no-key or same-key).
+          return;
+        }
+        // Validated (live OR the idle holding page, which is meant to embed):
+        // add the iframe if it isn't there yet. This is both the first-embed
+        // path and the recovery path for a host that was unreachable — its tile
+        // carried no iframe — and has come back. A fresh embed is clean, so
+        // clear the missed-poll counter that would otherwise force a reload.
+        if (!tile.querySelector("iframe")) {
+          embed(tile);
+          tile.dataset.down = 0;
+        }
+        // An already-embedded iframe that sat on the browser's own error page
+        // (host was down when it loaded, no script of ours runs there) gets
+        // reloaded when the host returns. Two missed polls required so a single
+        // stats timeout on a congested link can't restart healthy playback (the
+        // key check above already covers restarts, but not --no-key or same-key).
         else if (live && +tile.dataset.down >= 2)
           tile.querySelector("iframe").src = url;
         if (live) tile.dataset.down = 0;

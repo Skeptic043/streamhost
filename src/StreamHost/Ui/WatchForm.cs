@@ -78,8 +78,16 @@ public sealed class WatchForm : Form
             // instead of spawning bare WebView2 popup windows.
             _web.CoreWebView2.NewWindowRequested += (_, e) =>
             {
+                // Always handle it so no bare WebView2 popup spawns; but only shell
+                // out to the default browser for a real http(s) link. A malicious
+                // grid entry could otherwise carry a file: or custom-protocol URI
+                // that UseShellExecute would launch as a local program.
                 e.Handled = true;
-                try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(e.Uri) { UseShellExecute = true }); } catch { }
+                if (Uri.TryCreate(e.Uri, UriKind.Absolute, out Uri? uri)
+                    && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps))
+                {
+                    try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(e.Uri) { UseShellExecute = true }); } catch { }
+                }
             };
             // The page's Find-streams button asks us to search (the probing
             // needs the tailscale CLI, which the page can't run).
