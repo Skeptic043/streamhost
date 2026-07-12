@@ -28,9 +28,13 @@ internal static class Program
         if (args.Length >= 2 && args[0] == "--setup-port" && int.TryParse(args[1], out int setupPort))
         {
             string? setupUser = null;
-            for (int i = 2; i < args.Length - 1; i++)
-                if (args[i] == "--setup-user") setupUser = args[i + 1];
-            return Util.PortSetup.Run(setupPort, setupUser);
+            bool allowLan = false; // presence of --setup-lan opts into the LAN ranges
+            for (int i = 2; i < args.Length; i++)
+            {
+                if (args[i] == "--setup-user" && i + 1 < args.Length) setupUser = args[++i];
+                else if (args[i] == "--setup-lan") allowLan = true;
+            }
+            return Util.PortSetup.Run(setupPort, setupUser, allowLan);
         }
 
         // Double-click (no args) → the app window. CLI args → console mode.
@@ -321,6 +325,6 @@ internal static class Program
         Console.WriteLine("           [--height 1080] [--encoder auto|h264_nvenc|h264_amf|h264_qsv|libx264]");
         Console.WriteLine("           [--name \"shown to viewers\"] [--audio \"app\"] [--no-audio] [--no-cursor] [--frag-ms N]");
         Console.WriteLine("           [--no-key (viewer links work without ?k=)] [--list-monitors] [--list-windows]");
-        Console.WriteLine("StreamHost --setup-port N [--setup-user \"DOMAIN\\user\"]  -> reserve URL + firewall (admin)");
+        Console.WriteLine("StreamHost --setup-port N [--setup-user \"DOMAIN\\user\"] [--setup-lan]  -> reserve URL + firewall (admin)");
     }
 }

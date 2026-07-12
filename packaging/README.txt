@@ -17,7 +17,12 @@ SETUP (once, ~2 minutes)
    If you'd rather do it up front, or "Fix access" doesn't work for
    some reason, right-click setup.bat -> Run as administrator instead.
    It does the same thing: reserves the stream port and adds a firewall
-   rule limited to Tailscale and private LAN address ranges.
+   rule scoped to Tailscale addresses.
+
+   The firewall rule allows only Tailscale by default. To also let devices
+   on your local network (LAN) reach the stream, tick "Allow LAN viewers"
+   in the app before clicking "Fix access", or answer yes to the LAN prompt
+   in setup.bat.
 
 STREAMING
 ---------

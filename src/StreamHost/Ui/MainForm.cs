@@ -105,6 +105,11 @@ public sealed class MainForm : Form
     // 26px: at 24 the label's descenders (p/y/g) clipped against the border.
     private readonly Button _bundleButton = new() { Text = "Copy log", Width = 82, Height = 26, Anchor = AnchorStyles.Top | AnchorStyles.Right };
     private readonly Button _fixPortButton = new() { Text = "Fix access (open port)", Width = 142, Height = 26, Visible = false, Anchor = AnchorStyles.Top | AnchorStyles.Right };
+    // Short label (the 760px window's status row is crowded); full meaning is in
+    // the tooltip. Default off: Tailscale-only is the secure default. Shares the
+    // Fix access button's visibility.
+    private readonly CheckBox _allowLanCheck = new() { Text = "Allow LAN viewers", AutoSize = true, Checked = false, Visible = false, Anchor = AnchorStyles.Right, Margin = new Padding(0, 5, 8, 0) };
+    private readonly ToolTip _toolTip = new();
     private readonly NumericUpDown _portInput = new() { Minimum = 1024, Maximum = 65535, Value = 8093, Width = 80 };
     private readonly Button _startButton = new() { Text = "▶  Start streaming", Width = 160, Height = 38 };
     private readonly Button _copyButton = new() { Text = "Copy link", Width = 92, Height = 38 };
@@ -230,8 +235,20 @@ public sealed class MainForm : Form
         statusPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         statusPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         statusPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        // [Allow LAN][Fix access] ride together in a right-anchored strip so the
+        // extra checkbox doesn't cost a statusPanel column or shove Copy log.
+        var fixAccessGroup = new FlowLayoutPanel
+        {
+            AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
+            Margin = new Padding(0), Anchor = AnchorStyles.Right, BackColor = Bg,
+        };
+        fixAccessGroup.Controls.Add(_allowLanCheck);
+        fixAccessGroup.Controls.Add(_fixPortButton);
+        _toolTip.SetToolTip(_allowLanCheck,
+            "Also allow devices on your local network, not just Tailscale, to reach this stream");
         statusPanel.Controls.Add(_statusLabel, 0, 0);
-        statusPanel.Controls.Add(_fixPortButton, 1, 0);
+        statusPanel.Controls.Add(fixAccessGroup, 1, 0);
         statusPanel.Controls.Add(_bundleButton, 2, 0);
         _statusLabel.Anchor = AnchorStyles.Left;
         _fixPortButton.Anchor = AnchorStyles.Right;
@@ -778,6 +795,7 @@ public sealed class MainForm : Form
         Text = "StreamHost";
         _livePort = 0;
         _fixPortButton.Visible = false;
+        _allowLanCheck.Visible = false;
         SetLiveLock(false);
         UpdateLinkBox();
         _statusLabel.Text = reason is null or "stopped" ? "Not streaming." : $"Stopped: {reason}";
@@ -938,12 +956,14 @@ public sealed class MainForm : Form
         if (_session!.LocalOnly)
         {
             _fixPortButton.Visible = true;
+            _allowLanCheck.Visible = true;
             _statusLabel.ForeColor = Color.Goldenrod;
             _statusLabel.Text = $"LIVE, THIS PC ONLY: click Fix access to let viewers reach port {_livePort}";
         }
         else
         {
             _fixPortButton.Visible = false;
+            _allowLanCheck.Visible = false;
             _statusLabel.ForeColor = Green;
             _statusLabel.Text = $"LIVE · {_session.Description} · {EncoderLabel(_session.ActiveEncoder)}   viewers: {b.ViewerCount}   source: {b.SourceFps} fps (dup {b.DupPercent}%)";
         }
@@ -1012,9 +1032,30 @@ public sealed class MainForm : Form
     private void FixPortAccess()
     {
         int port = _livePort > 0 ? _livePort : (int)_portInput.Value;
+
+        // Don't blow away another app's URL reservation without asking. Reading
+        // the reservation needs no admin, so we check here on the UI thread
+        // before the UAC relaunch. Ours (or none) proceeds silently.
+        string me = $"{Environment.UserDomainName}\\{Environment.UserName}";
+        string? owner = ReadReservationOwner(port);
+        if (owner is not null && !owner.Equals(me, StringComparison.OrdinalIgnoreCase))
+        {
+            var choice = MessageBox.Show(this,
+                $"Port {port} is already reserved by another account:\n\n{owner}\n\n" +
+                "Replacing that reservation may break the app that created it. " +
+                "Reserve this port for StreamHost anyway?",
+                "StreamHost", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+            if (choice != DialogResult.Yes)
+            {
+                AppendLog($"Kept the existing reservation for port {port}; pick a different port instead.");
+                return;
+            }
+        }
+
         AppendLog($"Asking for administrator approval to configure port {port}…");
-        var psi = new System.Diagnostics.ProcessStartInfo(Application.ExecutablePath,
-            $"--setup-port {port} --setup-user \"{Environment.UserDomainName}\\{Environment.UserName}\"")
+        string arguments = $"--setup-port {port} --setup-user \"{me}\"";
+        if (_allowLanCheck.Checked) arguments += " --setup-lan";
+        var psi = new System.Diagnostics.ProcessStartInfo(Application.ExecutablePath, arguments)
         {
             UseShellExecute = true,
             Verb = "runas",
@@ -1062,6 +1103,26 @@ public sealed class MainForm : Form
             catch { }
         })
         { IsBackground = true, Name = "fix-port" }.Start();
+    }
+
+    /// <summary>The account currently granted this port's URL reservation, or
+    /// null if none is reserved / it can't be read. Parsed from the "User:" line
+    /// of `netsh http show urlacl`; reading it needs no elevation.</summary>
+    private static string? ReadReservationOwner(int port)
+    {
+        try
+        {
+            var r = Util.ProcessRunner.Run("netsh", $"http show urlacl url=http://+:{port}/", 5000);
+            foreach (var line in r.StdOut.Split('\n'))
+            {
+                int idx = line.IndexOf("User:", StringComparison.OrdinalIgnoreCase);
+                if (idx < 0) continue;
+                string owner = line[(idx + 5)..].Trim();
+                return owner.Length == 0 ? null : owner;
+            }
+        }
+        catch { }
+        return null;
     }
 
     /// <summary>Everything needed to debug a report, one clipboard copy:
