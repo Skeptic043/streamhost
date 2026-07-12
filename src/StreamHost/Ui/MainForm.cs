@@ -1099,8 +1099,9 @@ public sealed class MainForm : Form
         }
     }
 
-    private static string RedactKey(string text) =>
-        System.Text.RegularExpressions.Regex.Replace(text, @"\?k=\w+", "?k=[key]");
+    // Delegate to the bundle scrubber so there is ONE key alphabet everywhere.
+    // The old \w+ pattern dropped a hyphen in base64url keys, leaking the suffix.
+    private static string RedactKey(string text) => Util.BundleScrubber.RedactKeyParam(text);
 
     /// <summary>Relaunches this exe elevated to reserve the URL and open the
     /// firewall for the current port (same steps as setup.bat), then restarts

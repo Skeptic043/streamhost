@@ -18,6 +18,20 @@ public static class BundleScrubber
     private static readonly Regex KeyParam =
         new(@"[?&]k=[A-Za-z0-9_\-]+", RegexOptions.Compiled);
 
+    // The shared window title can be a bank tab or a private document name, so it
+    // is masked while the [proc] suffix (useful debug context) stays. Non-greedy
+    // up to the closing "' [" so a title with an apostrophe (e.g. Bob's Bank) is
+    // still fully redacted.
+    private static readonly Regex WindowTitle =
+        new(@"window '.*?' \[", RegexOptions.Compiled);
+
+    /// <summary>Masks ?k=/&k= viewer-key tokens in one line of text, keeping the
+    /// base64url alphabet consistent with <see cref="Scrub"/>. Used by the GUI's
+    /// copied-link log lines so a hyphen-containing key can't leak a suffix into
+    /// the on-disk log that Scrub then can't recover as one contiguous token.</summary>
+    public static string RedactKeyParam(string text) =>
+        string.IsNullOrEmpty(text) ? text ?? "" : KeyParam.Replace(text, m => m.Value[0] + "k=[key]");
+
     // Tailscale CGNAT range 100.64.0.0/10. A broad 100.x.x.x is deliberate: the
     // owner would rather over-mask a stray non-tailscale 100.x than leak a real
     // tailnet address that a pasted bundle carries around.
@@ -79,6 +93,11 @@ public static class BundleScrubber
 
             // 3) Tailscale IPs in text and URLs (masks RedactKey's copied-link host).
             s = TailscaleIp.Replace(s, "100.x.x.x");
+
+            // 4) Shared window title -> [title], keeping the [proc] suffix. A title
+            // can be a bank tab or private document name; the process name stays as
+            // debug context. The machine/stream name is deliberately NOT touched.
+            s = WindowTitle.Replace(s, "window '[title]' [");
 
             return s;
         }
