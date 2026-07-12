@@ -208,6 +208,7 @@ internal static class Program
             BitrateKbps = opts.BitrateKbps,
             Port = opts.Port,
             OutHeight = opts.OutHeight,
+            MaxViewers = opts.MaxViewers,
             Encoder = opts.Encoder,
             FragMs = opts.FragMs,
             NoCursor = opts.NoCursor,
@@ -263,6 +264,7 @@ internal static class Program
         public int BitrateKbps = 12000;
         public int Port = 8093;
         public int OutHeight = 0;
+        public int MaxViewers = 24; // 0 = unlimited
         public string Encoder = "auto";
         public bool ListMonitors = false;
         public bool ListWindows = false;
@@ -299,6 +301,7 @@ internal static class Program
                     case "--bitrate": o.BitrateKbps = Int("--bitrate"); break;
                     case "--port": o.Port = InRange("--port", Int("--port"), 1, 65535); break;
                     case "--height": o.OutHeight = Positive("--height", Int("--height")); break;
+                    case "--max-viewers": o.MaxViewers = Int("--max-viewers"); break; // 0 or less = unlimited
                     case "--width": Positive("--width", Int("--width")); break; // legacy no-op; height drives scaling, AR preserved
                     case "--encoder": o.Encoder = Next(); break;
                     case "--list-monitors": o.ListMonitors = true; break;
@@ -322,7 +325,7 @@ internal static class Program
     {
         Console.WriteLine("StreamHost                     -> app window");
         Console.WriteLine("StreamHost [--monitor N | --window \"title/exe\"] [--fps 30|60] [--bitrate kbps, 0=auto] [--port N]");
-        Console.WriteLine("           [--height 1080] [--encoder auto|h264_nvenc|h264_amf|h264_qsv|libx264]");
+        Console.WriteLine("           [--height 1080] [--encoder auto|h264_nvenc|h264_amf|h264_qsv|libx264] [--max-viewers N, 0=unlimited]");
         Console.WriteLine("           [--name \"shown to viewers\"] [--audio \"app\"] [--no-audio] [--no-cursor] [--frag-ms N]");
         Console.WriteLine("           [--no-key (viewer links work without ?k=)] [--list-monitors] [--list-windows]");
         Console.WriteLine("StreamHost --setup-port N [--setup-user \"DOMAIN\\user\"] [--setup-lan]  -> reserve URL + firewall (admin)");

@@ -32,6 +32,9 @@ public sealed record SessionConfig
     /// restarts so links keep working within one streaming run.</summary>
     public string? ViewKey { get; init; }
     public int OutHeight { get; init; }          // 0 = native; else scale to this height (AR kept)
+
+    /// <summary>Hard viewer cap handed to the Broadcaster. 0 = unlimited.</summary>
+    public int MaxViewers { get; init; } = 24;
     public string Encoder { get; init; } = "auto";
     public int FragMs { get; init; } = 50;
     public bool NoCursor { get; init; }
@@ -242,6 +245,7 @@ public sealed class StreamSession
             Width = outW,
             Height = outH,
             Fps = _config.Fps,
+            MaxViewers = _config.MaxViewers,
             HasAudio = audioPipeName is not null,
             StreamName = string.IsNullOrWhiteSpace(_config.StreamName)
                 ? Environment.MachineName : _config.StreamName.Trim(),

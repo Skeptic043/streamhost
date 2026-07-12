@@ -112,9 +112,12 @@ public sealed class WebServer : IDisposable
 
     private async Task HandleAsync(HttpListenerContext context, CancellationToken ct)
     {
+        // Hoisted so the catch can name the failing route. AbsolutePath excludes
+        // the query string, so the viewer key never lands in the error log.
+        string path = "/";
         try
         {
-            string path = context.Request.Url?.AbsolutePath ?? "/";
+            path = context.Request.Url?.AbsolutePath ?? "/";
             bool keyOk = _viewKey is null || context.Request.QueryString["k"] == _viewKey;
 
             if (path == "/ws")
@@ -202,6 +205,9 @@ public sealed class WebServer : IDisposable
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            // Log before responding: a bare 500 with no detail erased exactly the
+            // info a public bug report needs. ConsoleMirror tees this to the log.
+            Console.Error.WriteLine($"[http] {path} handler error: {ex}");
             try { context.Response.StatusCode = 500; context.Response.Close(); } catch { }
         }
     }
