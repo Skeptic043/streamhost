@@ -85,6 +85,11 @@ internal static class Program
         System.Windows.Forms.Application.ThreadException += (_, e) =>
         {
             LogFatal("ui-thread", e.Exception, fatal: true);
+            // Stop the live session BEFORE the modal dialog blocks: a broken app must
+            // not keep streaming to viewers while this waits for the OK click.
+            // ExitAfterFatal calls the same stop again afterwards; it is idempotent
+            // (guarded, and StreamSession.Stop just re-cancels + re-joins a dead thread).
+            try { Ui.AppRunContext.Current?.StopSessionForShutdown(); } catch { }
             try
             {
                 System.Windows.Forms.MessageBox.Show(
@@ -113,10 +118,12 @@ internal static class Program
         };
     }
 
-    /// <summary>Fatal-exception exit (Brian's decision): after the log and dialog,
-    /// don't resume the message loop into a half-broken app. Stop any live session
-    /// gracefully — bounded, so a wedged session can't hang shutdown; ChildJob kills
-    /// ffmpeg with the process regardless — then exit nonzero. Never throws.</summary>
+    /// <summary>Fatal-exception exit (Brian's decision): don't resume the message
+    /// loop into a half-broken app. Stop any live session gracefully — bounded, so a
+    /// wedged session can't hang shutdown; ChildJob kills ffmpeg with the process
+    /// regardless — then exit nonzero. The UI-thread handler already stops the session
+    /// before its dialog, so this stop is often a harmless no-op; the background
+    /// (dialog-less) path relies on this one. Never throws.</summary>
     private static void ExitAfterFatal()
     {
         try { Ui.AppRunContext.Current?.StopSessionForShutdown(); } catch { }

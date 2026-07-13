@@ -90,17 +90,25 @@ public static class PortSetup
     }
 
     /// <summary>The account currently granted this URL, with FAIL-CLOSED semantics
-    /// for the interactive (setup.bat) confirm: null when nothing is reserved, the
-    /// owner string when the "User:" line parses, or <see cref="UnknownOwner"/> when
-    /// it is reserved but the owner can't be read. Distinct from ReadReservationUser,
-    /// which returns null-on-unparse because it feeds the restore's `user=` argument
-    /// where a sentinel would corrupt it; here a sentinel is what makes the confirm
-    /// refuse to replace a reservation it can't identify.</summary>
+    /// for the interactive (setup.bat) confirm: null ONLY when the probe ran cleanly
+    /// and nothing is reserved; the owner string when the "User:" line parses; or
+    /// <see cref="UnknownOwner"/> for every not-cleanly-known case — reserved but the
+    /// owner can't be read, a probe timeout, a nonzero netsh exit, or netsh failing
+    /// to launch at all. The sentinel keeps a caller from deleting a reservation it
+    /// could not positively read as either absent or its own. Distinct from
+    /// ReadReservationUser, which returns null-on-unparse because it feeds the
+    /// restore's `user=` argument where a sentinel would corrupt it; here a sentinel
+    /// is what makes the confirm refuse to replace a reservation it can't identify.</summary>
     public static string? ReadReservationOwner(int port)
     {
         try
         {
             var r = ProcessRunner.Run("netsh", $"http show urlacl url=http://+:{port}/", 5000);
+            // A timeout (killed, ExitCode null) or a nonzero exit means the probe did
+            // not run to completion, so its output can't be trusted to say "nothing
+            // reserved". Fail closed to the sentinel rather than fall through to null.
+            if (r.TimedOut || r.ExitCode is not 0)
+                return UnknownOwner;
             bool reserved = r.StdOut.Contains($"http://+:{port}/", StringComparison.OrdinalIgnoreCase);
             foreach (var line in r.StdOut.Split('\n'))
             {
@@ -112,7 +120,8 @@ public static class PortSetup
             return reserved ? UnknownOwner : null;
         }
         catch { }
-        return null;
+        // Process.Start threw (netsh missing, etc.): can't say it's unreserved.
+        return UnknownOwner;
     }
 
     /// <summary>The RemoteIP scope currently on this port's firewall rule, or null

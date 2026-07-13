@@ -668,12 +668,17 @@ public sealed class MainForm : Form
                         var fallback = config with { Encoder = "libx264" };
                         int gen = _lifecycleGen; // the cycle this retry belongs to
                         _cpuRetryTimer?.Dispose(); // never expected here, but never leak one either
-                        _cpuRetryTimer = new System.Windows.Forms.Timer { Interval = 250 };
-                        _cpuRetryTimer.Tick += (_, _) =>
+                        var timer = new System.Windows.Forms.Timer { Interval = 250 };
+                        _cpuRetryTimer = timer;
+                        timer.Tick += (_, _) =>
                         {
-                            _cpuRetryTimer?.Stop();
-                            _cpuRetryTimer?.Dispose();
-                            _cpuRetryTimer = null;
+                            // Operate on the captured instance, never the shared field: a
+                            // stale tick must not stop/dispose a newer timer that a later
+                            // cycle has since placed in the field. Only null the field when
+                            // it still references THIS timer.
+                            timer.Stop();
+                            timer.Dispose();
+                            if (ReferenceEquals(_cpuRetryTimer, timer)) _cpuRetryTimer = null;
                             // A stale tick must do nothing: the form may have closed while a
                             // Watch window kept the loop alive, or a later stop/start cycle
                             // may have moved on. The generation catches the latter even when
@@ -681,7 +686,7 @@ public sealed class MainForm : Form
                             if (IsDisposed || gen != _lifecycleGen) return;
                             if (_pendingCpuRetry) { _pendingCpuRetry = false; LaunchSession(fallback); }
                         };
-                        _cpuRetryTimer.Start();
+                        timer.Start();
                         return;
                     }
                     OnSessionStopped(userRequested ? null : reason, session.WentLive);
@@ -869,23 +874,36 @@ public sealed class MainForm : Form
 
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
 
-        // OK only: translate the dialog's picks onto the main controls. Refresh the
-        // main lists now (the one time this method mutates them) so the picked
-        // source resolves against a current enumeration, then match by name (window),
-        // index (monitor/preset), and key (audio) - deep HWND/device matching is out
-        // of scope. Cancel returned above without touching anything.
-        _rbWindow.Checked = rbWin.Checked;
-        _rbMonitor.Checked = rbMon.Checked;
+        // OK only. Refresh the main lists once (the single time this method mutates
+        // them) so the picks resolve against a current enumeration, then VALIDATE
+        // every specific pick BEFORE writing any main control: a source the dialog
+        // captured but that has since vanished (window closed, monitor unplugged,
+        // audio app exited) aborts the switch instead of silently falling through to
+        // whatever the refreshed main list happens to select. All reads below happen
+        // before the first write, so an abort leaves the running stream untouched.
+        // Matching stays shallow - name (window), index (monitor/preset), key (audio);
+        // deep HWND/device matching is out of scope.
         PopulateSources();
+
+        // Window pick, resolved whether or not the window radio is active (so a later
+        // switch back to it stays correct). Only an ACTIVE-but-unresolved pick aborts.
+        int winTarget = -1;
+        string? winProc = null;
         if (winCombo.SelectedIndex >= 0 && winCombo.SelectedIndex < dlgWindows.Count)
         {
-            string proc = dlgWindows[winCombo.SelectedIndex].ProcessName;
-            int mi = _windows.FindIndex(w => w.ProcessName.Equals(proc, StringComparison.OrdinalIgnoreCase));
-            if (mi >= 0) _windowCombo.SelectedIndex = mi;
+            winProc = dlgWindows[winCombo.SelectedIndex].ProcessName;
+            winTarget = _windows.FindIndex(w => w.ProcessName.Equals(winProc, StringComparison.OrdinalIgnoreCase));
         }
-        if (monCombo.SelectedIndex >= 0 && monCombo.SelectedIndex < _monitorCombo.Items.Count)
-            _monitorCombo.SelectedIndex = monCombo.SelectedIndex;
-        if (presetCombo.SelectedIndex >= 0) _presetCombo.SelectedIndex = presetCombo.SelectedIndex;
+        if (rbWin.Checked && winTarget < 0)
+        {
+            AppendLog($"Switch cancelled: '{winProc ?? "the picked window"}' is no longer available. Pick again.");
+            return;
+        }
+        if (rbMon.Checked && monCombo.SelectedIndex >= _monitorCombo.Items.Count)
+        {
+            AppendLog("Switch cancelled: the picked monitor is no longer available. Pick again.");
+            return;
+        }
         string pickedAudioKey = audioCombo.SelectedIndex switch
         {
             0 => "none",
@@ -893,6 +911,20 @@ public sealed class MainForm : Form
             > 1 when audioCombo.SelectedIndex - 2 < dlgWindows.Count => dlgWindows[audioCombo.SelectedIndex - 2].ProcessName,
             _ => "window",
         };
+        if (pickedAudioKey is not ("none" or "window") &&
+            _windows.FindIndex(w => w.ProcessName.Equals(pickedAudioKey, StringComparison.OrdinalIgnoreCase)) < 0)
+        {
+            AppendLog($"Switch cancelled: audio source '{pickedAudioKey}' is no longer available. Pick again.");
+            return;
+        }
+
+        // All picks resolved: now apply them to the main controls.
+        _rbWindow.Checked = rbWin.Checked;
+        _rbMonitor.Checked = rbMon.Checked;
+        if (winTarget >= 0) _windowCombo.SelectedIndex = winTarget;
+        if (monCombo.SelectedIndex >= 0 && monCombo.SelectedIndex < _monitorCombo.Items.Count)
+            _monitorCombo.SelectedIndex = monCombo.SelectedIndex;
+        if (presetCombo.SelectedIndex >= 0) _presetCombo.SelectedIndex = presetCombo.SelectedIndex;
         SelectAudioByKey(pickedAudioKey);
         // Writing the source/preset back above repopulated the main bitrate combo;
         // now apply the tier the user picked in the dialog.
@@ -1268,13 +1300,20 @@ public sealed class MainForm : Form
         // the reservation needs no admin, so we check here on the UI thread
         // before the UAC relaunch. Ours (or none) proceeds silently.
         string me = $"{Environment.UserDomainName}\\{Environment.UserName}";
-        string? owner = ReadReservationOwner(port);
+        string? owner = Util.PortSetup.ReadReservationOwner(port);
         if (owner is not null && !owner.Equals(me, StringComparison.OrdinalIgnoreCase))
         {
-            var choice = MessageBox.Show(this,
-                $"Port {port} is already reserved by another account:\n\n{owner}\n\n" +
-                "Replacing that reservation may break the app that created it. " +
-                "Reserve this port for StreamHost anyway?",
+            // The sentinel means the reservation exists but its owner couldn't be
+            // read (or even probed): word the prompt for that instead of splicing
+            // the sentinel into "reserved by another account: <owner>".
+            string body = owner == Util.PortSetup.UnknownOwner
+                ? $"Port {port} is already reserved, but StreamHost could not read which account owns it.\n\n" +
+                  "Replacing that reservation may break the app that created it. " +
+                  "Reserve this port for StreamHost anyway?"
+                : $"Port {port} is already reserved by another account:\n\n{owner}\n\n" +
+                  "Replacing that reservation may break the app that created it. " +
+                  "Reserve this port for StreamHost anyway?";
+            var choice = MessageBox.Show(this, body,
                 "StreamHost", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
             if (choice != DialogResult.Yes)
             {
@@ -1370,34 +1409,6 @@ public sealed class MainForm : Form
             catch { _fixingPort = false; } // form gone before we could report back — release the guard
         })
         { IsBackground = true, Name = "fix-port" }.Start();
-    }
-
-    /// <summary>The account currently granted this port's URL reservation, or
-    /// null if none is reserved / it can't be read. Reading it needs no
-    /// elevation. Fails CLOSED: existence is tested against the reserved URL
-    /// string (which is not localized), so on a non-English Windows where the
-    /// "User:" line is labelled differently, a foreign reservation still returns
-    /// a sentinel — the caller's confirm dialog then fires instead of silently
-    /// replacing it. English systems parse the User: line first, unchanged.</summary>
-    private static string? ReadReservationOwner(int port)
-    {
-        try
-        {
-            var r = Util.ProcessRunner.Run("netsh", $"http show urlacl url=http://+:{port}/", 5000);
-            bool reserved = r.StdOut.Contains($"http://+:{port}/", StringComparison.OrdinalIgnoreCase);
-            foreach (var line in r.StdOut.Split('\n'))
-            {
-                int idx = line.IndexOf("User:", StringComparison.OrdinalIgnoreCase);
-                if (idx < 0) continue;
-                string owner = line[(idx + 5)..].Trim();
-                if (owner.Length > 0) return owner;
-            }
-            // Reserved but the owner line didn't parse (non-English locale): don't
-            // pretend it's ours. A sentinel worded to read well in the dialog.
-            return reserved ? "an account StreamHost could not identify" : null;
-        }
-        catch { }
-        return null;
     }
 
     /// <summary>Everything needed to debug a report, one clipboard copy:
