@@ -30,6 +30,35 @@ $ffmpegVersionLine = (& dist/StreamHost/ffmpeg.exe -version | Select-Object -Fir
 $ffmpegBuildconf = ""
 $ffmpegBuildconfLine = (& dist/StreamHost/ffmpeg.exe -version | Select-String -SimpleMatch 'configuration:' | Select-Object -First 1)
 if ($ffmpegBuildconfLine) { $ffmpegBuildconf = $ffmpegBuildconfLine.ToString().Trim() }
+if ([string]::IsNullOrWhiteSpace($ffmpegBuildconf)) {
+    throw "Could not read the ffmpeg build configuration; refusing to guess its license."
+}
+if ($ffmpegBuildconf -match '(?:^|\s)--enable-nonfree(?:\s|$)') {
+    throw "The selected ffmpeg build uses --enable-nonfree and cannot be redistributed."
+}
+
+Write-Host "Checking ffmpeg capabilities..."
+$requiredCapabilities = @{
+    '-encoders' = @('libx264', 'h264_nvenc', 'h264_amf', 'h264_qsv', 'aac')
+    '-decoders' = @('rawvideo', 'pcm_f32le')
+    '-demuxers' = @('rawvideo', 'f32le')
+    '-devices'  = @('lavfi')
+    '-filters'  = @('scale', 'testsrc')
+    '-muxers'   = @('mp4', 'null')
+    '-pix_fmts' = @('bgra', 'yuv420p')
+    '-protocols' = @('pipe')
+}
+foreach ($query in $requiredCapabilities.Keys) {
+    $listing = (& dist/StreamHost/ffmpeg.exe -hide_banner $query 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0) { throw "ffmpeg $query failed; refusing to package an unverified build." }
+    foreach ($capability in $requiredCapabilities[$query]) {
+        $pattern = "(?m)^\s*(?:[A-Z.]{1,8}\s+)?$([regex]::Escape($capability))(?:\s|$)"
+        if ($listing -notmatch $pattern) {
+            throw "The selected ffmpeg build does not provide required capability '$capability' ($query)."
+        }
+    }
+}
+
 $ffmpegHash = (Get-FileHash dist/StreamHost/ffmpeg.exe -Algorithm SHA256).Hash
 $buildDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss 'UTC'")
 $buildInfo = @(
@@ -52,14 +81,15 @@ Write-Host "Adding license + third-party notices..."
 Copy-Item LICENSE dist/StreamHost/LICENSE.txt -Force
 
 # Generated at package time so it describes the actual bundled ffmpeg.exe.
-# Derive ffmpeg's license from its build configuration (captured above).
-if ([string]::IsNullOrWhiteSpace($ffmpegBuildconf)) {
-    $ffmpegLicenseLine = "FFmpeg is used here under the GNU Lesser General Public License (LGPL) version 2.1 or later. (The ffmpeg build configuration could not be read at package time, so this is the conservative default.)"
-    $isGpl = $false
-} elseif ($ffmpegBuildconf -like '*--enable-gpl*') {
-    $ffmpegLicenseLine = "FFmpeg is used here under the GNU General Public License (GPL) version 3 or later."
+# Derive ffmpeg's license from its build configuration (validated above).
+if ($ffmpegBuildconf -match '(?:^|\s)--enable-gpl(?:\s|$)') {
+    $ffmpegLicenseLine = if ($ffmpegBuildconf -match '(?:^|\s)--enable-version3(?:\s|$)') {
+        "FFmpeg is used here under the GNU General Public License (GPL) version 3 or later."
+    } else {
+        "FFmpeg is used here under the GNU General Public License (GPL) version 2 or later."
+    }
     $isGpl = $true
-} elseif ($ffmpegBuildconf -like '*--enable-version3*') {
+} elseif ($ffmpegBuildconf -match '(?:^|\s)--enable-version3(?:\s|$)') {
     $ffmpegLicenseLine = "FFmpeg is used here under the GNU Lesser General Public License (LGPL) version 3 or later."
     $isGpl = $false
 } else {

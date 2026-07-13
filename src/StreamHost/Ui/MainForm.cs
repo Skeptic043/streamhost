@@ -818,16 +818,16 @@ public sealed class MainForm : Form
         audioCombo.Items.Add(rbWin.Checked ? "Captured window's audio" : "No audio (monitor share: pick an app below)");
         foreach (var w in dlgWindows) audioCombo.Items.Add($"{w.ProcessName} - {Truncate(w.Title, 40)}");
 
-        // Preselect to the current main selection, matched by name (window),
-        // index (monitor/preset), and key (audio) - the same shallow matching the
-        // OK path uses.
-        string? curWinProc = _windowCombo.SelectedIndex >= 0 && _windowCombo.SelectedIndex < _windows.Count
-            ? _windows[_windowCombo.SelectedIndex].ProcessName : null;
-        int wsel = curWinProc is null ? -1
-            : dlgWindows.FindIndex(w => w.ProcessName.Equals(curWinProc, StringComparison.OrdinalIgnoreCase));
-        winCombo.SelectedIndex = wsel >= 0 ? wsel : (dlgWindows.Count > 0 ? 0 : -1);
-        monCombo.SelectedIndex = _monitorCombo.SelectedIndex >= 0 && _monitorCombo.SelectedIndex < dlgMonitors.Count
-            ? _monitorCombo.SelectedIndex : (dlgMonitors.Count > 0 ? 0 : -1);
+        // Preselect the current capture source by exact identity. If it vanished
+        // between enumerations, leave it unselected so the user must pick again.
+        IntPtr? curWinHandle = _windowCombo.SelectedIndex >= 0 && _windowCombo.SelectedIndex < _windows.Count
+            ? _windows[_windowCombo.SelectedIndex].Handle : null;
+        winCombo.SelectedIndex = curWinHandle is null
+            ? -1 : dlgWindows.FindIndex(w => w.Handle == curWinHandle.Value);
+        string? curMonDevice = _monitorCombo.SelectedIndex >= 0 && _monitorCombo.SelectedIndex < _monitors.Count
+            ? _monitors[_monitorCombo.SelectedIndex].DeviceName : null;
+        monCombo.SelectedIndex = curMonDevice is null
+            ? -1 : dlgMonitors.FindIndex(m => m.DeviceName.Equals(curMonDevice, StringComparison.OrdinalIgnoreCase));
         presetCombo.SelectedIndex = _presetCombo.SelectedIndex;
         string curAudioKey = SelectedAudioKey();
         audioCombo.SelectedIndex = curAudioKey switch
@@ -912,10 +912,11 @@ public sealed class MainForm : Form
         // every specific pick BEFORE writing any main control: a source the dialog
         // captured but that has since vanished (window closed, monitor unplugged,
         // audio app exited) aborts the switch instead of silently falling through to
-        // whatever the refreshed main list happens to select. All reads below happen
-        // before the first write, so an abort leaves the running stream untouched.
-        // Matching stays shallow - name (window), index (monitor/preset), key (audio);
-        // deep HWND/device matching is out of scope.
+        // whatever the refreshed main list happens to select. All resolution reads
+        // below happen before the first selected-value write, so an abort leaves the
+        // running stream's effective configuration untouched.
+        // Match the picked capture source by stable identity: HWND for a window and
+        // device name for a monitor. Preset remains by index and audio by key.
         PopulateSources();
 
         // Window pick, resolved whether or not the window radio is active (so a later
@@ -924,15 +925,22 @@ public sealed class MainForm : Form
         string? winProc = null;
         if (winCombo.SelectedIndex >= 0 && winCombo.SelectedIndex < dlgWindows.Count)
         {
-            winProc = dlgWindows[winCombo.SelectedIndex].ProcessName;
-            winTarget = _windows.FindIndex(w => w.ProcessName.Equals(winProc, StringComparison.OrdinalIgnoreCase));
+            var pickedWindow = dlgWindows[winCombo.SelectedIndex];
+            winProc = pickedWindow.ProcessName;
+            winTarget = _windows.FindIndex(w => w.Handle == pickedWindow.Handle);
         }
         if (rbWin.Checked && winTarget < 0)
         {
             AppendLog($"Switch cancelled: '{winProc ?? "the picked window"}' is no longer available. Pick again.");
             return;
         }
-        if (rbMon.Checked && monCombo.SelectedIndex >= _monitorCombo.Items.Count)
+        int monTarget = -1;
+        if (monCombo.SelectedIndex >= 0 && monCombo.SelectedIndex < dlgMonitors.Count)
+        {
+            string deviceName = dlgMonitors[monCombo.SelectedIndex].DeviceName;
+            monTarget = _monitors.FindIndex(m => m.DeviceName.Equals(deviceName, StringComparison.OrdinalIgnoreCase));
+        }
+        if (rbMon.Checked && monTarget < 0)
         {
             AppendLog("Switch cancelled: the picked monitor is no longer available. Pick again.");
             return;
@@ -955,8 +963,7 @@ public sealed class MainForm : Form
         _rbWindow.Checked = rbWin.Checked;
         _rbMonitor.Checked = rbMon.Checked;
         if (winTarget >= 0) _windowCombo.SelectedIndex = winTarget;
-        if (monCombo.SelectedIndex >= 0 && monCombo.SelectedIndex < _monitorCombo.Items.Count)
-            _monitorCombo.SelectedIndex = monCombo.SelectedIndex;
+        if (monTarget >= 0) _monitorCombo.SelectedIndex = monTarget;
         if (presetCombo.SelectedIndex >= 0) _presetCombo.SelectedIndex = presetCombo.SelectedIndex;
         SelectAudioByKey(pickedAudioKey);
         // Writing the source/preset back above repopulated the main bitrate combo;

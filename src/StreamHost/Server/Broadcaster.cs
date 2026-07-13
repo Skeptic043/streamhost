@@ -113,7 +113,9 @@ public sealed class Broadcaster
             if (Interlocked.Increment(ref _reserved) > MaxViewers)
             {
                 Interlocked.Decrement(ref _reserved);
-                try { await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation, "stream is full (viewer limit reached)", ct); } catch { }
+                using var closeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                closeCts.CancelAfter(TimeSpan.FromSeconds(2));
+                try { await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation, "stream is full (viewer limit reached)", closeCts.Token); } catch { }
                 try { socket.Abort(); } catch { }
                 Console.WriteLine($"[ws] viewer rejected; at capacity ({MaxViewers})");
                 return;
