@@ -90,6 +90,12 @@ public sealed class MainForm : Form
         // Set only when a Fix access with "Allow LAN" checked actually succeeded,
         // so the app knows LAN addresses are reachable (not merely requested).
         public bool AllowLan { get; set; }
+        // The exact port that Fix access last configured. LAN is advertised only
+        // when AllowLan is set AND the port in play matches this, so editing the
+        // port after a successful fix can't advertise LAN on a port never opened.
+        // A missing value deserializes to 0, which matches no real port, so LAN
+        // stays off until the next successful Fix access on that port.
+        public int AllowLanPort { get; set; }
     }
 
     private static readonly string SettingsPath = Path.Combine(
@@ -149,6 +155,10 @@ public sealed class MainForm : Form
     // Fix access with Allow LAN checked, never on a mere checkbox toggle. Gates
     // whether LAN addresses are treated as reachable for links and status.
     private bool _allowLanApplied;
+    // The port Fix access last configured. LAN gating is per-port (LanAppliedForPort):
+    // _allowLanApplied alone let an edit to the port field advertise LAN on a port
+    // that was never opened, since the helper had configured a different live port.
+    private int _allowLanPort;
 
     // The viewer key for the NEXT stream, minted up front so a link copied while
     // idle already carries ?k=. Reused when the stream starts and rotated only
@@ -368,7 +378,16 @@ public sealed class MainForm : Form
             // guard short-circuits, so it can't re-enter the timers we dispose below.
             var session = _session;
             _session = null;
-            session?.Stop();
+            // Fail closed: if teardown wedges past the join timeout and a Watch
+            // window keeps the process alive, the detached session would keep
+            // streaming with no handle left to stop it. Take the whole app down
+            // (the ChildJob job object reaps ffmpeg on process exit); this also
+            // closes any open Watch window, a cost accepted over an invisible stream.
+            if (session is not null && !session.Stop())
+            {
+                Console.WriteLine("[shutdown] stream teardown did not finish in time; closing the app to avoid an invisible stream.");
+                Environment.Exit(1);
+            }
             StopIdleServer();
             // Cancel a scheduled CPU retry so its timer can't fire on this closed
             // form and start an invisible session (a Watch window may keep the
@@ -1184,7 +1203,7 @@ public sealed class MainForm : Form
             // the stream is up but nobody can reach it — warn instead of green.
             var addrs = StreamSession.GetShareAddresses(includeLan: true);
             bool tailscaleReachable = addrs.Any(StreamSession.IsTailscaleAddress);
-            bool lanReachable = !tailscaleReachable && _allowLanApplied
+            bool lanReachable = !tailscaleReachable && LanAppliedForPort(_livePort)
                 && addrs.Any(a => !StreamSession.IsTailscaleAddress(a));
             if (tailscaleReachable || lanReachable)
             {
@@ -1216,6 +1235,11 @@ public sealed class MainForm : Form
         _ => encoder,
     };
 
+    /// <summary>LAN is reachable for a port only when a Fix access with Allow LAN
+    /// succeeded for THAT port. Guards against advertising LAN on a port the helper
+    /// never opened (e.g. the field was edited to a new port after the fix).</summary>
+    private bool LanAppliedForPort(int port) => _allowLanApplied && port == _allowLanPort;
+
     private string BuildUrl(string pathSuffix)
     {
         // Never hand out a network address the server can't actually answer on.
@@ -1224,6 +1248,8 @@ public sealed class MainForm : Form
         // localhost. LocalOnly (no URL ACL) forces localhost regardless: honor the
         // live session while streaming, else the holding page's own bind so an
         // idle localhost-only fallback isn't advertised as a network address.
+        // Port in play: the live session's while streaming, else the box the link uses.
+        int port = _livePort > 0 ? _livePort : (int)_portInput.Value;
         string host;
         bool localOnly = _session is { } live ? live.LocalOnly : _idleServer?.LocalOnly == true;
         if (localOnly)
@@ -1233,14 +1259,13 @@ public sealed class MainForm : Form
             var tailscale = StreamSession.GetShareAddresses(includeLan: false);
             if (tailscale.Count > 0)
                 host = tailscale[0];
-            else if (_allowLanApplied &&
+            else if (LanAppliedForPort(port) &&
                      StreamSession.GetShareAddresses(includeLan: true)
                          .FirstOrDefault(a => !StreamSession.IsTailscaleAddress(a)) is { } lan)
                 host = lan;
             else
                 host = "localhost";
         }
-        int port = _livePort > 0 ? _livePort : (int)_portInput.Value;
         string url = $"http://{host}:{port}/{pathSuffix}";
         // While streaming, the live session's key; while idle, the pending key the
         // next stream will accept, so a link copied now already carries ?k= and a
@@ -1385,8 +1410,13 @@ public sealed class MainForm : Form
                     if (code == 0)
                     {
                         // Record the scope that was actually applied — the pre-launch
-                        // snapshot, never the live checkbox, and only on success.
+                        // snapshot, never the live checkbox, and only on success. Bind it
+                        // to the exact port the helper configured (the snapshot `port`, not
+                        // the current box), so a later port edit can't inherit this LAN grant.
+                        // On a success with Allow LAN unchecked, applied stays false but the
+                        // port is still recorded (the helper configured it Tailscale-only).
                         _allowLanApplied = requestedAllowLan;
+                        _allowLanPort = port;
                         SaveSettings();
                         AppendLog($"Port {port} configured.");
                         if (_session is not null && _lastConfig is not null && !_stopping)
@@ -1639,6 +1669,7 @@ public sealed class MainForm : Form
             int encIdx = Array.FindIndex(Encoders, e => e.Value == s.Encoder);
             _encoderCombo.SelectedIndex = encIdx >= 0 ? encIdx : 0;
             _allowLanApplied = s.AllowLan;
+            _allowLanPort = s.AllowLanPort;
             _allowLanCheck.Checked = s.AllowLan;
             UpdateAudioModeLabel();
         }
@@ -1663,6 +1694,7 @@ public sealed class MainForm : Form
                 StreamName = _nameInput.Text.Trim(),
                 Encoder = ((EncoderChoice)_encoderCombo.SelectedItem!).Value,
                 AllowLan = _allowLanApplied,
+                AllowLanPort = _allowLanPort,
             };
             Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!);
             // Write to a sibling temp file, then atomically swap it in, so a crash

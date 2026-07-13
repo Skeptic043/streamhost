@@ -74,85 +74,113 @@ public sealed class DuplicationCapture : ICaptureSource
         if (foundAdapter is null || foundOutput is null)
             throw new InvalidOperationException("Monitor not found among DXGI outputs");
 
-        // Capture adapter identity for the init log — on hybrid/multi-GPU boxes the
-        // capture adapter need not be the render or encoder adapter.
-        string adapterLuid = "?";
-        string driverVersion = "?";
+        // Transactional from here on: every step below acquires a D3D/DXGI resource
+        // into a field, and several can throw (the DuplicateOutput reject, the
+        // rotated-display NotSupportedException, texture creation). AutoMonitorCapture
+        // retries this ctor on failure, so a partial build must dispose what it got
+        // instead of leaking GPU/COM objects. On any throw, release the acquired
+        // resources in reverse order and rethrow; ownership transfers to the finished
+        // object only if construction reaches the end.
         try
         {
-            AdapterName = foundAdapter.Description1.Description;
-            GpuVendorId = (uint)foundAdapter.Description1.VendorId;
-            var luid = foundAdapter.Description1.Luid;
-            adapterLuid = $"{luid.HighPart}:{luid.LowPart}";
-            // Best-effort UMD driver version, decoded from the packed long into the
-            // conventional four 16-bit fields — a diagnostics read must never throw
-            // out of the constructor or fail capture.
+            // Capture adapter identity for the init log — on hybrid/multi-GPU boxes the
+            // capture adapter need not be the render or encoder adapter.
+            string adapterLuid = "?";
+            string driverVersion = "?";
             try
             {
-                if (foundAdapter.CheckInterfaceSupport(typeof(IDXGIDevice), out long umd))
-                    driverVersion = $"{(umd >> 48) & 0xFFFF}.{(umd >> 32) & 0xFFFF}.{(umd >> 16) & 0xFFFF}.{umd & 0xFFFF}";
+                AdapterName = foundAdapter.Description1.Description;
+                GpuVendorId = (uint)foundAdapter.Description1.VendorId;
+                var luid = foundAdapter.Description1.Luid;
+                adapterLuid = $"{luid.HighPart}:{luid.LowPart}";
+                // Best-effort UMD driver version, decoded from the packed long into the
+                // conventional four 16-bit fields — a diagnostics read must never throw
+                // out of the constructor or fail capture.
+                try
+                {
+                    if (foundAdapter.CheckInterfaceSupport(typeof(IDXGIDevice), out long umd))
+                        driverVersion = $"{(umd >> 48) & 0xFFFF}.{(umd >> 32) & 0xFFFF}.{(umd >> 16) & 0xFFFF}.{umd & 0xFFFF}";
+                }
+                catch { driverVersion = "?"; }
+
+                D3D11.D3D11CreateDevice(
+                    foundAdapter, DriverType.Unknown, DeviceCreationFlags.BgraSupport,
+                    null!, out ID3D11Device? device, out _, out ID3D11DeviceContext? context).CheckError();
+                _device = device!;
+                _context = context!;
+
+                // Duplication calls (AcquireNextFrame/GetFramePointerShape, capture
+                // thread) use the immediate context internally WITHOUT locking, while
+                // TryReadFrame maps staging textures on the pacing thread. Without
+                // runtime-level protection that race corrupts the device (observed:
+                // DEVICE_REMOVED at Map, AccessViolation reading a mapped frame).
+                using (var mt = _context.QueryInterfaceOrNull<ID3D11Multithread>())
+                    mt?.SetMultithreadProtected(true);
+
+                _output = foundOutput.QueryInterface<IDXGIOutput1>();
+                try
+                {
+                    _duplication = _output.DuplicateOutput(_device);
+                }
+                catch (Exception ex)
+                {
+                    throw new InvalidOperationException(
+                        "could not start desktop duplication; another app may be capturing this display (overlay/recorder), or the display is transitioning", ex);
+                }
+
+                var mode = _duplication.Description.ModeDescription;
+                if (_duplication.Description.Rotation != ModeRotation.Identity)
+                    throw new NotSupportedException("Compatibility capture does not support rotated displays; use the standard capture for this monitor");
+                Width = (int)mode.Width & ~1;
+                Height = (int)mode.Height & ~1;
             }
-            catch { driverVersion = "?"; }
-
-            D3D11.D3D11CreateDevice(
-                foundAdapter, DriverType.Unknown, DeviceCreationFlags.BgraSupport,
-                null!, out ID3D11Device? device, out _, out ID3D11DeviceContext? context).CheckError();
-            _device = device!;
-            _context = context!;
-
-            // Duplication calls (AcquireNextFrame/GetFramePointerShape, capture
-            // thread) use the immediate context internally WITHOUT locking, while
-            // TryReadFrame maps staging textures on the pacing thread. Without
-            // runtime-level protection that race corrupts the device (observed:
-            // DEVICE_REMOVED at Map, AccessViolation reading a mapped frame).
-            using (var mt = _context.QueryInterfaceOrNull<ID3D11Multithread>())
-                mt?.SetMultithreadProtected(true);
-
-            _output = foundOutput.QueryInterface<IDXGIOutput1>();
-            try
+            finally
             {
-                _duplication = _output.DuplicateOutput(_device);
+                foundOutput.Dispose();
+                foundAdapter.Dispose();
             }
-            catch (Exception ex)
+
+            Console.WriteLine($"[capture] desktop duplication on {AdapterName}, {Width}x{Height}, LUID {adapterLuid}, driver {driverVersion}");
+
+            var desc = new Texture2DDescription
             {
-                throw new InvalidOperationException(
-                    "could not start desktop duplication; another app may be capturing this display (overlay/recorder), or the display is transitioning", ex);
-            }
+                Width = (uint)Width,
+                Height = (uint)Height,
+                MipLevels = 1,
+                ArraySize = 1,
+                Format = Format.B8G8R8A8_UNorm,
+                SampleDescription = new SampleDescription(1, 0),
+                Usage = ResourceUsage.Default,
+                BindFlags = BindFlags.None,
+                CPUAccessFlags = CpuAccessFlags.None,
+            };
+            _latest = _device.CreateTexture2D(desc);
+            desc.Usage = ResourceUsage.Staging;
+            desc.CPUAccessFlags = CpuAccessFlags.Read;
+            _stagingA = _device.CreateTexture2D(desc);
+            _stagingB = _device.CreateTexture2D(desc);
 
-            var mode = _duplication.Description.ModeDescription;
-            if (_duplication.Description.Rotation != ModeRotation.Identity)
-                throw new NotSupportedException("Compatibility capture does not support rotated displays; use the standard capture for this monitor");
-            Width = (int)mode.Width & ~1;
-            Height = (int)mode.Height & ~1;
+            _thread = new Thread(CaptureLoop) { IsBackground = true, Name = "dxgi-duplication" };
+            _thread.Start();
         }
-        finally
+        catch
         {
-            foundOutput.Dispose();
-            foundAdapter.Dispose();
+            // Partial build: dispose every resource acquired so far in reverse order,
+            // each individually guarded so one failure can't mask another, then rethrow.
+            // foundOutput/foundAdapter are already released by the inner finally above.
+            // No thread to stop: its Start() is the last statement, so a throw here
+            // always precedes it.
+            try { _stagingB?.Dispose(); } catch { }
+            try { _stagingA?.Dispose(); } catch { }
+            try { _latest?.Dispose(); } catch { }
+            try { _duplication?.Dispose(); } catch { }
+            try { _output?.Dispose(); } catch { }
+            try { _context?.Dispose(); } catch { }
+            try { _device?.Dispose(); } catch { }
+            try { _frameSignal.Dispose(); } catch { }
+            try { _cts.Dispose(); } catch { }
+            throw;
         }
-
-        Console.WriteLine($"[capture] desktop duplication on {AdapterName}, {Width}x{Height}, LUID {adapterLuid}, driver {driverVersion}");
-
-        var desc = new Texture2DDescription
-        {
-            Width = (uint)Width,
-            Height = (uint)Height,
-            MipLevels = 1,
-            ArraySize = 1,
-            Format = Format.B8G8R8A8_UNorm,
-            SampleDescription = new SampleDescription(1, 0),
-            Usage = ResourceUsage.Default,
-            BindFlags = BindFlags.None,
-            CPUAccessFlags = CpuAccessFlags.None,
-        };
-        _latest = _device.CreateTexture2D(desc);
-        desc.Usage = ResourceUsage.Staging;
-        desc.CPUAccessFlags = CpuAccessFlags.Read;
-        _stagingA = _device.CreateTexture2D(desc);
-        _stagingB = _device.CreateTexture2D(desc);
-
-        _thread = new Thread(CaptureLoop) { IsBackground = true, Name = "dxgi-duplication" };
-        _thread.Start();
     }
 
     private void CaptureLoop()

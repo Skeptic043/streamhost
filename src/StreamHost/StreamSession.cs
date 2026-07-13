@@ -123,11 +123,15 @@ public sealed class StreamSession
     public void RequestStop() => _cts.Cancel();
 
     /// <summary>Blocking stop for process exit paths: don't leave an orphaned
-    /// ffmpeg behind just because the app window closed.</summary>
-    public void Stop()
+    /// ffmpeg behind just because the app window closed. Returns true when the
+    /// session thread is no longer running (joined in time, already finished, or
+    /// never started); false only when the 6 s join timed out with the thread
+    /// still running (teardown wedged, the stream may still be live).</summary>
+    public bool Stop()
     {
         _cts.Cancel();
-        _thread?.Join(6000);
+        var t = _thread;
+        return t is null || t.Join(6000);
     }
 
     [DllImport("kernel32.dll")]

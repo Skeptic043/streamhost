@@ -61,7 +61,10 @@ public sealed class ProcessAudioCapture : IDisposable
     private readonly BlockingCollection<(byte[] Buffer, int Length)> _queue = new(boundedCapacity: 256);
     // Both touched only on the capture thread (Emit / RepayOwedSilence / idle fill).
     private long _owedSilenceBytes; // dropped audio duration owed back as silence, bounded by MaxCatchupBytes
-    private long _deliveredFrames;  // frames actually enqueued to the writer (real + silence) — the stream clock
+    // The stream clock: frames that reached AND stayed in the writer path (real +
+    // silence). A block removed from the queue before the writer saw it is
+    // uncounted here and owed back as silence, so a drop advances nothing net.
+    private long _deliveredFrames;
 
     public ProcessAudioCapture(uint targetPid, Action<byte[], int> onSamples)
     {
@@ -249,8 +252,9 @@ public sealed class ProcessAudioCapture : IDisposable
 
     /// <summary>Hand samples to the writer queue (review RB-01). Fresh ALWAYS lands
     /// first (drop-oldest when the queue is full), so a sustained slowdown keeps fresh
-    /// flowing and can never become permanent silence; a DROPPED packet advances
-    /// nothing — its duration is owed as silence. Owed silence is then repaid into
+    /// flowing and can never become permanent silence; a dropped or removed block
+    /// advances the clock by nothing net (the removed oldest is uncounted from
+    /// _deliveredFrames) — its duration is owed as silence. Owed silence is then repaid into
     /// whatever room REMAINS: a no-op while the queue stays full (owed accrues, bounded),
     /// a contiguous gap once the stall clears (resync). So a transient stall becomes a
     /// brief silence gap then live audio, never permanent silence, never desync.</summary>
@@ -264,7 +268,15 @@ public sealed class ProcessAudioCapture : IDisposable
         }
         else
         {
-            if (_queue.TryTake(out var stale)) OweSilence(stale.Length);
+            if (_queue.TryTake(out var stale))
+            {
+                // TryTake only removes a block the writer never consumed. It was
+                // counted into _deliveredFrames at its own enqueue, so uncount it
+                // here before owing its duration back as silence — otherwise the
+                // clock would count it twice (once now, once when the silence repays).
+                _deliveredFrames -= stale.Length / BytesPerFrame;
+                OweSilence(stale.Length);
+            }
             if (TryEnqueue((buf, len))) _deliveredFrames += len / BytesPerFrame;
             else OweSilence(len); // writer took the freed slot first
             if (!overflowLogged)
