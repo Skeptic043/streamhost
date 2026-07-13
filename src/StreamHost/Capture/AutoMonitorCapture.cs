@@ -48,7 +48,7 @@ public sealed class AutoMonitorCapture : ICaptureSource
         {
             // Duplication can't start here (rotated display, another capture app,
             // transition in progress) — fall back to standard capture.
-            Console.WriteLine($"[capture] desktop duplication unavailable ({ex.Message}) — using standard capture");
+            Console.WriteLine($"[capture] desktop duplication unavailable ({ex.Message}); using standard capture");
             _active = ScreenCapture.ForMonitor(hMonitor);
         }
         Width = _active.Width;
@@ -125,7 +125,7 @@ public sealed class AutoMonitorCapture : ICaptureSource
     private void Swap(bool toDuplication, string reason)
     {
         _lastSwapAttemptTicks = Stopwatch.GetTimestamp();
-        Console.WriteLine($"[capture] switching to {(toDuplication ? "desktop duplication" : "standard capture")} — {reason}");
+        Console.WriteLine($"[capture] switching to {(toDuplication ? "desktop duplication" : "standard capture")}: {reason}");
         try
         {
             ICaptureSource fresh = toDuplication

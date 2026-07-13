@@ -230,7 +230,7 @@ public sealed class StreamSession
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"[audio] process loopback failed ({ex.Message}) — feeding silence instead.");
+                    Console.Error.WriteLine($"[audio] process loopback failed ({ex.Message}); feeding silence instead.");
                     var silence = new byte[Audio.ProcessAudioCapture.SampleRate * Audio.ProcessAudioCapture.Channels * 4 / 100];
                     new Thread(() =>
                     {
@@ -281,10 +281,10 @@ public sealed class StreamSession
             {
                 broadcaster.State = "failed";
                 Console.Error.WriteLine("[capture] no frames received within 5 seconds.");
-                Console.Error.WriteLine($"[capture] backend started but never delivered a frame — source: {_config.SourceName}, adapter: {capture.AdapterName}.");
+                Console.Error.WriteLine($"[capture] backend started but never delivered a frame; source: {_config.SourceName}, adapter: {capture.AdapterName}.");
                 Console.Error.WriteLine("[capture] worth trying: a different source, the compatibility capture option, or a GPU driver update.");
-                Console.Error.WriteLine("[capture] when reporting this, use Copy log in the app — the log file path is printed at startup.");
-                return "no frames from screen capture — see log";
+                Console.Error.WriteLine("[capture] when reporting this, use Copy log in the app; the log file path is printed at startup.");
+                return "no frames from screen capture; see log";
             }
             Thread.Sleep(100);
         }
@@ -294,7 +294,7 @@ public sealed class StreamSession
         // Console users have no other way to get the link, so the key is printed
         // (and therefore lands in the log file) — the support bundle strips it.
         string keySuffix = _config.ViewKey is null ? "" : $"?k={_config.ViewKey}";
-        Console.WriteLine($"[ready] first frame captured — streaming {Description} via {encoder}");
+        Console.WriteLine($"[ready] first frame captured; streaming {Description} via {encoder}");
         Console.WriteLine($"[ready] watch at: http://localhost:{_config.Port}/{keySuffix}");
         // Tailscale addresses are in scope in every firewall config, so they are
         // always live. LAN addresses only work if LAN access was actually opened;
@@ -327,7 +327,7 @@ public sealed class StreamSession
             {
                 if (ct.IsCancellationRequested) return;
                 _encoderStalled = true;
-                Console.Error.WriteLine($"[encoder] {ffmpeg.EncoderName} produced no output at all in 10s — the encoder is stalled.");
+                Console.Error.WriteLine($"[encoder] {ffmpeg.EncoderName} produced no output at all in 10s; the encoder is stalled.");
                 _cts.Cancel();
                 return;
             }
@@ -342,8 +342,8 @@ public sealed class StreamSession
                 {
                     _encoderStalled = true;
                     Console.Error.WriteLine(firstWindow
-                        ? $"[encoder] {ffmpeg.EncoderName} wrote the header but produced almost no video in 5s — the encoder is stalling."
-                        : $"[encoder] {ffmpeg.EncoderName} stopped producing video mid-stream — the encoder has stalled.");
+                        ? $"[encoder] {ffmpeg.EncoderName} wrote the header but produced almost no video in 5s; the encoder is stalling."
+                        : $"[encoder] {ffmpeg.EncoderName} stopped producing video mid-stream; the encoder has stalled.");
                     _cts.Cancel();
                     return;
                 }
@@ -386,7 +386,7 @@ public sealed class StreamSession
 
             if (ffmpeg.HasExited || writer.Failed)
             {
-                Console.Error.WriteLine($"[encoder] ffmpeg exited unexpectedly (code {ffmpeg.ExitCode}) — stopping.");
+                Console.Error.WriteLine($"[encoder] ffmpeg exited unexpectedly (code {ffmpeg.ExitCode}); stopping.");
                 return $"encoder exited unexpectedly (code {ffmpeg.ExitCode})";
             }
             if (capture.CaptureError is not null)
@@ -398,12 +398,12 @@ public sealed class StreamSession
             if (splitterTask.IsFaulted)
             {
                 Console.Error.WriteLine($"[mp4] splitter failed: {splitterTask.Exception?.GetBaseException().Message}");
-                return "mp4 splitter failed — see log";
+                return "mp4 splitter failed; see log";
             }
             if (serverTask.IsFaulted)
             {
                 Console.Error.WriteLine($"[http] server failed: {serverTask.Exception?.GetBaseException().Message}");
-                return "web server failed — see log";
+                return "web server failed; see log";
             }
 
             bool fresh = capture.WaitForFreshFrame(lastVersion, graceMs);

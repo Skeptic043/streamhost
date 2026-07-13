@@ -130,7 +130,7 @@ public sealed class FfmpegEncoder : IDisposable
             if (File.Exists(CachePath))
             {
                 File.Delete(CachePath);
-                Console.WriteLine("[encoder] cleared the cached probe verdict — the next launch re-probes the GPU encoder.");
+                Console.WriteLine("[encoder] cleared the cached probe verdict; the next launch re-probes the GPU encoder.");
             }
         }
         catch { }
@@ -161,7 +161,7 @@ public sealed class FfmpegEncoder : IDisposable
 
         if (!ProbeEncoder(preferred))
         {
-            Console.WriteLine($"[encoder] {preferred} failed its self-test — falling back to CPU (libx264)");
+            Console.WriteLine($"[encoder] {preferred} failed its self-test; falling back to CPU (libx264)");
             return "libx264";
         }
 
@@ -293,7 +293,7 @@ public sealed class FfmpegEncoder : IDisposable
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[encoder] could not run ffmpeg ({ex.Message}) — is ffmpeg.exe next to StreamHost.exe?");
+            Console.Error.WriteLine($"[encoder] could not run ffmpeg ({ex.Message}); is ffmpeg.exe next to StreamHost.exe?");
             return false;
         }
     }

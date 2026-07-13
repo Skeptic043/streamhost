@@ -21,8 +21,8 @@ SETUP (once, ~2 minutes)
 
    The firewall rule allows only Tailscale by default. To also let devices
    on your local network (LAN) reach the stream, tick "Allow LAN viewers"
-   in the app before clicking "Fix access", or answer yes to the LAN prompt
-   in setup.bat.
+   in the app before clicking "Fix access". setup.bat always sets up
+   Tailscale-only; use the app for LAN access.
 
 STREAMING
 ---------
@@ -99,3 +99,7 @@ and encoder info on the clipboard. Paste it when reporting a problem.
 - "Port ... is already in use": another program (often another copy of
   StreamHost still running) has that port. Close it, or set a different
   port in the app.
+- Everything looks fine on your end but nobody can connect: firewall
+  state can drift (a Windows reset, another program, a network profile
+  change). Run "Fix access" again. It configures one port at a time, so
+  after changing the port, run it again for the new one.

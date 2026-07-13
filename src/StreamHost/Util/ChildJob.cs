@@ -36,7 +36,7 @@ public static class ChildJob
     {
         if (_warned) return;
         _warned = true;
-        Console.Error.WriteLine($"[childjob] orphan protection not active: {detail} — a force-quit may leave ffmpeg running");
+        Console.Error.WriteLine($"[childjob] orphan protection not active: {detail}; a force-quit may leave ffmpeg running");
     }
 
     private static IntPtr Create()

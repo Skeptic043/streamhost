@@ -100,7 +100,7 @@ public sealed class ScreenCapture : ICaptureSource
             }
             catch { /* diagnostics only — never fail capture over adapter identity */ }
         }
-        Console.WriteLine($"[capture] adapter: {AdapterName}, Windows {Environment.OSVersion.Version} — LUID {adapterLuid}, driver {driverVersion}");
+        Console.WriteLine($"[capture] adapter: {AdapterName}, Windows {Environment.OSVersion.Version}, LUID {adapterLuid}, driver {driverVersion}");
 
         _winrtDevice = D3DInterop.CreateWinRtDevice(_device);
         _item = item;
@@ -136,7 +136,7 @@ public sealed class ScreenCapture : ICaptureSource
         // clean session stop instead of a silent freeze-frame.
         _item.Closed += (_, _) =>
         {
-            _captureError ??= new InvalidOperationException("the captured window was closed — start a new share once it's running again");
+            _captureError ??= new InvalidOperationException("the captured window was closed; start a new share once it's running again");
             try { _frameSignal.Set(); } catch (ObjectDisposedException) { }
         };
 
@@ -176,7 +176,7 @@ public sealed class ScreenCapture : ICaptureSource
             if (!_warnedResize && (cw != Width || ch != Height))
             {
                 _warnedResize = true;
-                Console.WriteLine($"[capture] source resized to {frame.ContentSize.Width}x{frame.ContentSize.Height} — output stays at {Width}x{Height}; restart the share for a clean full-size capture");
+                Console.WriteLine($"[capture] source resized to {frame.ContentSize.Width}x{frame.ContentSize.Height}; output stays at {Width}x{Height}; restart the share for a clean full-size capture");
             }
 
             using var texture = D3DInterop.GetTexture(frame.Surface);

@@ -83,7 +83,7 @@ public sealed class Broadcaster
                 // Overloaded viewer: dump backlog, wait for the next keyframe.
                 while (client.Queue.Reader.TryRead(out _)) { }
                 client.NeedsResync = true;
-                Console.WriteLine($"[ws] viewer {id:N} fell behind — resyncing at next keyframe");
+                Console.WriteLine($"[ws] viewer {id:N} fell behind; resyncing at next keyframe");
             }
         }
     }
@@ -115,7 +115,7 @@ public sealed class Broadcaster
                 Interlocked.Decrement(ref _reserved);
                 try { await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation, "stream is full (viewer limit reached)", ct); } catch { }
                 try { socket.Abort(); } catch { }
-                Console.WriteLine($"[ws] viewer rejected — at capacity ({MaxViewers})");
+                Console.WriteLine($"[ws] viewer rejected; at capacity ({MaxViewers})");
                 return;
             }
             reserved = true;

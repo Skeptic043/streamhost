@@ -149,7 +149,7 @@ public sealed class ProcessAudioCapture : IDisposable
                         if (hr < 0 && !errorLogged)
                         {
                             errorLogged = true;
-                            Console.Error.WriteLine($"[audio] capture read failed (0x{hr:X8}) — stream continues with silence.");
+                            Console.Error.WriteLine($"[audio] capture read failed (0x{hr:X8}); stream continues with silence.");
                         }
                         break;
                     }
@@ -214,7 +214,7 @@ public sealed class ProcessAudioCapture : IDisposable
         {
             // HP-04 / REL-1: an unhandled capture error ends this thread cleanly
             // and logs it. The mux-liveness cap keeps video going without audio.
-            Console.Error.WriteLine($"[audio] capture thread stopped on error ({ex.Message}) — video continues without audio.");
+            Console.Error.WriteLine($"[audio] capture thread stopped on error ({ex.Message}); video continues without audio.");
         }
         finally { RevertMmcss(mmcss); }
     }
@@ -270,7 +270,7 @@ public sealed class ProcessAudioCapture : IDisposable
             if (!overflowLogged)
             {
                 overflowLogged = true;
-                Console.Error.WriteLine("[audio] encoder is not draining audio — dropping stale audio to stay at the live edge; backfilling silence to resync.");
+                Console.Error.WriteLine("[audio] encoder is not draining audio; dropping stale audio to stay at the live edge; backfilling silence to resync.");
             }
         }
 

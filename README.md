@@ -22,8 +22,9 @@ with privacy addons, which is a big part of why this exists.
   mid-stream. Presets from 720p30 to 1440p60 plus Native, with a separate
   low/medium/high bitrate picker that always shows the actual Mbps, so you
   know what you're sending before you start.
-- Every stream gets a random viewer key baked into the link, so only people
-  with the current link can watch.
+- Every stream gets a random viewer key baked into the link, so a stale or
+  guessed link does not work. The Security section below spells out exactly
+  what the key does and does not protect.
 - A grid page tiles several streams in one tab, and the built-in Watch
   window shows the same grid without a browser, with one-click discovery of
   other StreamHost machines on your Tailscale network.
@@ -111,6 +112,37 @@ entirely, which is one reason sharing is the default recommendation.
 Tailscale specifics beyond that (ACLs and so on) are documented by
 Tailscale and out of scope here.
 
+## Security
+
+The model in plain terms, so you can decide whether it fits your use:
+
+- **What can reach the host.** The stream port accepts connections from
+  Tailscale addresses, and from your local network only if you tick "Allow
+  LAN viewers" and run Fix access. There is no public endpoint, no relay,
+  and no port forwarding; nothing is reachable from the public internet.
+- **What the viewer key does.** Each stream start generates a random key
+  that becomes part of the link. The stream page and the video itself
+  require it, so a bare address or an old link does not work. The status
+  endpoint and the page files themselves are not key-gated; that is what
+  lets grid pages check whether a host is live.
+- **Devices on your Tailscale network are trusted.** Only devices that can
+  reach the host over your tailnet or the permitted LAN can access it at
+  all, and Tailscale peers pick up the current viewer key automatically;
+  that is how Find streams and key rotation work, and it is deliberate.
+  In practice, reachability is the real gate: anyone you let onto your
+  tailnet, or share your PC with, can watch. The key mainly protects
+  against stale links and casual access from an allowed LAN.
+- **Tailscale is recognized by address range.** StreamHost treats the
+  100.64.0.0/10 range as Tailscale. Tailscale uses that range, but does
+  not own it exclusively; another VPN or a carrier-grade NAT setup that
+  puts addresses from it on your machine would receive the same trust.
+  Keep that in mind if you run one.
+- **What Copy log shares.** The support bundle scrubs viewer keys, your
+  Windows user name, file paths, and Tailscale addresses before anything
+  reaches the clipboard. It keeps the machine name, stream name, and app
+  names, since reports are rarely debuggable without them. Skim it before
+  posting if that matters to you.
+
 ## Common issues
 
 - The page never loads: the port isn't open on the host yet, or Tailscale
@@ -121,6 +153,11 @@ Tailscale and out of scope here.
 - The page says the stream needs its viewer key: the stream was restarted
   and the old link went stale. Send a fresh link, or have them use Find
   streams in the Watch window.
+- Status looks fine but nobody can connect: firewall state can drift (a
+  Windows reset, another program, a network profile change). Run Fix
+  access again. It configures one port at a time, so after changing the
+  port, run it again for the new one; LAN access in particular does not
+  carry over from a previous port.
 - A fullscreen game shows a frozen frame: share the whole monitor instead
   of the window, or set the game to borderless. Some exclusive-fullscreen
   setups can't be captured by anything.
@@ -168,9 +205,10 @@ StreamHost is built for a handful of friends, not an audience.
 **What's the latency?** Roughly half a second to a second, tuned for
 smoothness over speed.
 
-**Is opening the port safe?** The firewall rule only admits Tailscale and
-private LAN address ranges, and the stream itself requires the per-stream
-key from the link. Nothing is reachable from the public internet.
+**Is opening the port safe?** The firewall rule only admits Tailscale
+addresses (plus private LAN ranges if you opt in), and the stream itself
+requires the per-stream key from the link. Nothing is reachable from the
+public internet. The Security section above has the full model.
 
 **Can I run it from the command line?** Yes, any argument switches to
 console mode: `StreamHost.exe --monitor 0 --encoder libx264 --port 8093`.

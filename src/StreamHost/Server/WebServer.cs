@@ -52,7 +52,7 @@ public sealed class WebServer : IDisposable
         if (BoundPrefix.Contains("localhost"))
         {
             Console.WriteLine(_broadcaster is null
-                ? $"[http] holding page is localhost-only for now — port {port} opens up via Fix access or setup.bat."
+                ? $"[http] holding page is localhost-only for now; port {port} opens up via Fix access or setup.bat."
                 : $"[http] WARNING: bound to localhost only. Run setup.bat {port} as administrator, then restart the stream.");
         }
     }
@@ -80,7 +80,7 @@ public sealed class WebServer : IDisposable
     {
         string culprit = ProbedAnotherStreamHost(port)
             ? "another StreamHost is already running on this port (check the taskbar or Task Manager and close it, or pick a different port)"
-            : "another program is using this port — close it or pick a different port";
+            : "another program is using this port; close it or pick a different port";
         return $"Port {port} is already in use: {culprit}.";
     }
 

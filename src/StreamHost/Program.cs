@@ -275,7 +275,7 @@ internal static class Program
             Console.WriteLine($"[audio] source: {match.ProcessName} (pid {audioPid})");
         }
         if (audioPid == 0 && !opts.NoAudio && string.IsNullOrEmpty(opts.Window))
-            Console.WriteLine("[audio] no audio source (monitor share) — use --audio \"game name\" to add game audio");
+            Console.WriteLine("[audio] no audio source (monitor share); use --audio \"game name\" to add game audio");
 
         var config = new SessionConfig
         {
@@ -311,7 +311,7 @@ internal static class Program
                              (stopReason?.StartsWith("encoder exited") ?? false);
         if (encoderFailed && opts.Encoder != "libx264")
         {
-            Console.WriteLine("[encoder] GPU encoder produced no video — restarting with the CPU encoder (libx264)…");
+            Console.WriteLine("[encoder] GPU encoder produced no video; restarting with the CPU encoder (libx264)…");
             // Auto mode trusts a cached probe verdict; a live stall just disproved
             // it, so drop the cache to force a fresh probe next launch. Explicit
             // encoder mode never touched the cache, so there is nothing to clear.
@@ -320,7 +320,7 @@ internal static class Program
             // libx264 at 1440p and up may not sustain the same resolution/fps the
             // GPU was handling — warn instead of presenting fallback as recovery.
             if (session.OutputHeight >= 1440)
-                Console.WriteLine($"[encoder] warning: libx264 (CPU) may not keep up at {session.OutputWidth}x{session.OutputHeight}@{opts.Fps} — lower the Preset if playback is choppy.");
+                Console.WriteLine($"[encoder] warning: libx264 (CPU) may not keep up at {session.OutputWidth}x{session.OutputHeight}@{opts.Fps}; lower the Preset if playback is choppy.");
             Thread.Sleep(800); // let the port release
             done.Reset();
             var retry = new StreamSession(config with { Encoder = "libx264" });

@@ -116,12 +116,12 @@ public sealed class DuplicationCapture : ICaptureSource
             catch (Exception ex)
             {
                 throw new InvalidOperationException(
-                    "could not start desktop duplication — another app may be capturing this display (overlay/recorder), or the display is transitioning", ex);
+                    "could not start desktop duplication; another app may be capturing this display (overlay/recorder), or the display is transitioning", ex);
             }
 
             var mode = _duplication.Description.ModeDescription;
             if (_duplication.Description.Rotation != ModeRotation.Identity)
-                throw new NotSupportedException("Compatibility capture does not support rotated displays — use the standard capture for this monitor");
+                throw new NotSupportedException("Compatibility capture does not support rotated displays; use the standard capture for this monitor");
             Width = (int)mode.Width & ~1;
             Height = (int)mode.Height & ~1;
         }
@@ -131,7 +131,7 @@ public sealed class DuplicationCapture : ICaptureSource
             foundAdapter.Dispose();
         }
 
-        Console.WriteLine($"[capture] desktop duplication on {AdapterName}, {Width}x{Height} — LUID {adapterLuid}, driver {driverVersion}");
+        Console.WriteLine($"[capture] desktop duplication on {AdapterName}, {Width}x{Height}, LUID {adapterLuid}, driver {driverVersion}");
 
         var desc = new Texture2DDescription
         {
@@ -253,7 +253,7 @@ public sealed class DuplicationCapture : ICaptureSource
                 if (!_loggedCursorShape)
                 {
                     _loggedCursorShape = true;
-                    Console.WriteLine($"[capture] cursor shape acquired ({_pointerShapeInfo.Width}x{_pointerShapeInfo.Height}, type {_pointerShapeInfo.Type}) — compositing into frames");
+                    Console.WriteLine($"[capture] cursor shape acquired ({_pointerShapeInfo.Width}x{_pointerShapeInfo.Height}, type {_pointerShapeInfo.Type}); compositing into frames");
                 }
             }
         }

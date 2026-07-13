@@ -545,7 +545,7 @@ public sealed class MainForm : Form
         if (config is null) return;
 
         if (config.Port != 8093)
-            AppendLog("Note: setup.bat / Fix access configure one port at a time — other ports need their own run.");
+            AppendLog("Note: setup.bat / Fix access configure one port at a time; other ports need their own run.");
 
         _retriedCpu = false;
         SaveSettings();
@@ -571,7 +571,7 @@ public sealed class MainForm : Form
         {
             int idx = _windows.FindIndex(w => w.ProcessName.Equals(audioKey, StringComparison.OrdinalIgnoreCase));
             if (idx >= 0) audioPid = _windows[idx].Pid;
-            else AppendLog($"[audio] '{audioKey}' is not running — streaming without audio");
+            else AppendLog($"[audio] '{audioKey}' is not running; streaming without audio");
         }
 
         IntPtr windowHandle = IntPtr.Zero, monitorHandle = IntPtr.Zero;
@@ -655,7 +655,7 @@ public sealed class MainForm : Form
                     {
                         _retriedCpu = true;
                         _pendingCpuRetry = true;
-                        AppendLog("GPU encoder produced no video — restarting with the CPU encoder (libx264)…");
+                        AppendLog("GPU encoder produced no video; restarting with the CPU encoder (libx264)…");
                         // Auto mode trusts a cached probe verdict; a live stall just
                         // disproved it, so drop the cache to force a fresh probe next
                         // launch. Explicit encoder mode never cached, so nothing to clear.
@@ -664,7 +664,7 @@ public sealed class MainForm : Form
                         // libx264 at 1440p and up may not sustain the same resolution/fps
                         // the GPU handled — warn instead of calling fallback a recovery.
                         if (session.OutputHeight >= 1440)
-                            AppendLog($"Warning: libx264 (CPU) may not keep up at {session.OutputWidth}x{session.OutputHeight}@{config.Fps} — lower the Preset if playback is choppy.");
+                            AppendLog($"Warning: libx264 (CPU) may not keep up at {session.OutputWidth}x{session.OutputHeight}@{config.Fps}; lower the Preset if playback is choppy.");
                         var fallback = config with { Encoder = "libx264" };
                         int gen = _lifecycleGen; // the cycle this retry belongs to
                         _cpuRetryTimer?.Dispose(); // never expected here, but never leak one either
@@ -1277,7 +1277,7 @@ public sealed class MainForm : Form
         }
         catch (Exception ex)
         {
-            AppendLog($"Clipboard failed ({ex.Message}) — link: {RedactKey(url)}");
+            AppendLog($"Clipboard failed ({ex.Message}); link: {RedactKey(url)}");
         }
     }
 
@@ -1401,7 +1401,7 @@ public sealed class MainForm : Form
                         }
                     }
                     else if (code == -2)
-                        AppendLog("Administrator approval was declined — viewers on other machines stay blocked.");
+                        AppendLog("Administrator approval was declined; viewers on other machines stay blocked.");
                     else
                         AppendLog($"Port setup failed (code {code}). Fallback: run setup.bat {port} as administrator.");
                 });
@@ -1450,7 +1450,7 @@ public sealed class MainForm : Form
             string scrubbed = Util.BundleScrubber.Scrub(sb.ToString(),
                 new[] { _session?.ViewKey, _lastConfig?.ViewKey, _pendingKey });
             Clipboard.SetText(scrubbed);
-            AppendLog("Log copied (scrubbed, with version, system, and encoder info) — paste it into a bug report.");
+            AppendLog("Log copied (scrubbed, with version, system, and encoder info); paste it into a bug report.");
         }
         catch (Exception ex)
         {
