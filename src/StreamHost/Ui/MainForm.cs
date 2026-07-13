@@ -150,6 +150,14 @@ public sealed class MainForm : Form
     // whether LAN addresses are treated as reachable for links and status.
     private bool _allowLanApplied;
 
+    // The viewer key for the NEXT stream, minted up front so a link copied while
+    // idle already carries ?k=. Reused when the stream starts and rotated only
+    // after a run that went live stops, so an early-opened link auto-connects
+    // even for plain-LAN viewers (who can't learn a rotated key from /api/stats).
+    // Stable across idle rebinds (port/name edits) so already-copied links stay
+    // valid; a failed start keeps it too, since no stream ever served it.
+    private string _pendingKey = SessionConfig.NewViewKey();
+
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
 
@@ -320,7 +328,9 @@ public sealed class MainForm : Form
         _startButton.Click += (_, _) =>
         {
             // Clicking during a scheduled CPU retry cancels the retry.
-            if (_pendingCpuRetry) { CancelCpuRetry(); OnSessionStopped(null); return; }
+            // Cancelling a scheduled CPU retry: the GPU run got far enough to
+            // schedule a fallback, so treat its key as used and rotate it.
+            if (_pendingCpuRetry) { CancelCpuRetry(); OnSessionStopped(null, wentLive: true); return; }
             if (_session is null) StartStream(); else StopStream();
         };
         _switchButton.Click += (_, _) => ShowSwitchDialog();
@@ -529,7 +539,9 @@ public sealed class MainForm : Form
 
     private void StartStream()
     {
-        var config = BuildConfigFromUi((int)_portInput.Value, SessionConfig.NewViewKey());
+        // Reuse the pending key so links copied while idle (they carry ?k=this)
+        // stay valid the moment the stream goes live. Rotated after a live stop.
+        var config = BuildConfigFromUi((int)_portInput.Value, _pendingKey);
         if (config is null) return;
 
         if (config.Port != 8093)
@@ -672,7 +684,7 @@ public sealed class MainForm : Form
                         _cpuRetryTimer.Start();
                         return;
                     }
-                    OnSessionStopped(userRequested ? null : reason);
+                    OnSessionStopped(userRequested ? null : reason, session.WentLive);
                 });
             }
             catch { }
@@ -914,7 +926,7 @@ public sealed class MainForm : Form
         _session.RequestStop();
     }
 
-    private void OnSessionStopped(string? reason)
+    private void OnSessionStopped(string? reason, bool wentLive)
     {
         _statsTimer.Stop();
         _session = null;
@@ -926,6 +938,12 @@ public sealed class MainForm : Form
         _fixPortButton.Visible = false;
         _allowLanCheck.Visible = false;
         SetLiveLock(false);
+        // A run that actually served viewers rotates the viewer key, so links from
+        // that run stop working (the per-run key model). A start that never went
+        // live (bind failure, early capture error) keeps the pending key so an
+        // already-copied idle link still works on the next attempt. Rotate before
+        // the link box refreshes so it shows the new idle key.
+        if (wentLive) _pendingKey = SessionConfig.NewViewKey();
         UpdateLinkBox();
         _statusLabel.Text = reason is null or "stopped" ? "Not streaming." : $"Stopped: {reason}";
         _statusLabel.ForeColor = reason is null or "stopped" ? Dim : Red;
@@ -1192,7 +1210,10 @@ public sealed class MainForm : Form
         }
         int port = _livePort > 0 ? _livePort : (int)_portInput.Value;
         string url = $"http://{host}:{port}/{pathSuffix}";
-        if (pathSuffix.Length == 0 && _session?.ViewKey is { } key)
+        // While streaming, the live session's key; while idle, the pending key the
+        // next stream will accept, so a link copied now already carries ?k= and a
+        // tab opened early self-connects when the stream starts.
+        if (pathSuffix.Length == 0 && (_session?.ViewKey ?? _pendingKey) is { } key)
             url += $"?k={key}";
         return url;
     }
@@ -1416,7 +1437,7 @@ public sealed class MainForm : Form
             // clipboard and, from there, a public issue. The live keys are passed
             // as exact secrets so a raw key without a ?k= wrapper is caught too.
             string scrubbed = Util.BundleScrubber.Scrub(sb.ToString(),
-                new[] { _session?.ViewKey, _lastConfig?.ViewKey });
+                new[] { _session?.ViewKey, _lastConfig?.ViewKey, _pendingKey });
             Clipboard.SetText(scrubbed);
             AppendLog("Log copied (scrubbed, with version, system, and encoder info) — paste it into a bug report.");
         }

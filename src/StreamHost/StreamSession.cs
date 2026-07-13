@@ -88,6 +88,12 @@ public sealed class StreamSession
     /// <summary>True when the server could only bind localhost (no URL ACL for this port).</summary>
     public bool LocalOnly { get; private set; }
 
+    /// <summary>True once the first frame was captured and the broadcaster went
+    /// live. Lets a stop handler tell a run that actually served viewers (rotate
+    /// its key) from a start that failed before going live, e.g. a port bind
+    /// failure (keep the key so an already-copied idle link still works on retry).</summary>
+    public bool WentLive { get; private set; }
+
     /// <summary>Fires when the pipeline ends for any reason (Stop, ffmpeg death, error).</summary>
     public event Action<string>? Stopped;
 
@@ -284,6 +290,7 @@ public sealed class StreamSession
         }
 
         broadcaster.State = "live";
+        WentLive = true;
         // Console users have no other way to get the link, so the key is printed
         // (and therefore lands in the log file) — the support bundle strips it.
         string keySuffix = _config.ViewKey is null ? "" : $"?k={_config.ViewKey}";
