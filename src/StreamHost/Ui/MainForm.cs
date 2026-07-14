@@ -799,7 +799,7 @@ public sealed class MainForm : Form
 
         // Build the dialog combos off the dialog's own fresh lists (never the main
         // controls). Same item shapes as PopulateWindows/PopulateMonitors so the OK
-        // path can translate picks back by name/index/key.
+        // path can translate picks back by HWND/DeviceName/key.
         foreach (var w in dlgWindows) winCombo.Items.Add($"{w.ProcessName} - {Truncate(w.Title, 58)}");
         foreach (var m in dlgMonitors) monCombo.Items.Add($"{m.DeviceName}  {m.Width}x{m.Height}{(m.IsPrimary ? "  (primary)" : "")}");
         foreach (object it in _presetCombo.Items) presetCombo.Items.Add(it);

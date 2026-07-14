@@ -249,46 +249,76 @@ public sealed class FfmpegEncoder : IDisposable
         !value.StartsWith("unreadable", StringComparison.OrdinalIgnoreCase) &&
         !value.StartsWith("(resolved via PATH", StringComparison.OrdinalIgnoreCase);
 
+    private static readonly object _buildInfoLock = new();
+    private static (string version, string buildconf, string sha256)? _buildInfo;
+
     /// <summary>Version line, full build configuration, and a short binary hash of
     /// the ffmpeg at <see cref="FfmpegPath"/>. Reusable by the support bundle (and
     /// later probe diagnostics). Best-effort: every field degrades to a short note
     /// rather than throwing. The runner adopts + tree-kills on timeout, so a hung
-    /// "-version" can't leak.</summary>
+    /// "-version" can't leak. A fully-known identity is memoized for the process;
+    /// degraded results are returned but retried by the next caller.</summary>
     public static (string version, string buildconf, string sha256) FfmpegBuildInfo()
     {
-        string version = "unknown", buildconf = "unknown";
-        try
+        lock (_buildInfoLock)
         {
-            var r = Util.ProcessRunner.Run(FfmpegPath, "-version", 3000);
-            if (r.TimedOut) { version = buildconf = "timed out"; }
-            else
+            if (_buildInfo is { } cached)
+                return cached;
+
+            string version = "unknown", buildconf = "unknown";
+            try
             {
-                foreach (string line in r.StdOut.Split('\n'))
+                var r = Util.ProcessRunner.Run(FfmpegPath, "-version", 3000);
+                if (r.TimedOut) { version = buildconf = "timed out"; }
+                else
                 {
-                    string t = line.Trim();
-                    if (t.Length == 0) continue;
-                    if (version == "unknown") version = t; // first non-empty line is the version
-                    if (t.StartsWith("configuration:", StringComparison.OrdinalIgnoreCase))
-                        buildconf = t["configuration:".Length..].Trim();
+                    foreach (string line in r.StdOut.Split('\n'))
+                    {
+                        string t = line.Trim();
+                        if (t.Length == 0) continue;
+                        if (version == "unknown") version = t; // first non-empty line is the version
+                        if (t.StartsWith("configuration:", StringComparison.OrdinalIgnoreCase))
+                            buildconf = t["configuration:".Length..].Trim();
+                    }
+                    if (version == "unknown") version = "no output";
                 }
-                if (version == "unknown") version = "no output";
             }
-        }
-        catch (Exception ex) { version = buildconf = $"not runnable ({ex.Message})"; }
+            catch (Exception ex) { version = buildconf = $"not runnable ({ex.Message})"; }
 
-        string sha256 = "?";
+            string sha256 = "?";
+            try
+            {
+                if (File.Exists(FfmpegPath))
+                {
+                    using var fs = File.OpenRead(FfmpegPath);
+                    sha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(fs))[..16].ToLowerInvariant();
+                }
+                else sha256 = "(resolved via PATH, not hashed)";
+            }
+            catch (Exception ex) { sha256 = $"unreadable ({ex.Message})"; }
+
+            var result = (version, buildconf, sha256);
+            if (IdentityKnown(version) && IdentityKnown(buildconf) && IdentityKnown(sha256) &&
+                sha256.Length == 16 && sha256.All(Uri.IsHexDigit))
+                _buildInfo = result;
+            return result;
+        }
+    }
+
+    /// <summary>Starts a best-effort background read so the GUI's first stream start
+    /// normally finds the memoized identity ready. Queueing and the work itself are
+    /// fail-silent.</summary>
+    public static void WarmBuildInfo()
+    {
         try
         {
-            if (File.Exists(FfmpegPath))
+            _ = Task.Run(() =>
             {
-                using var fs = File.OpenRead(FfmpegPath);
-                sha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(fs))[..16].ToLowerInvariant();
-            }
-            else sha256 = "(resolved via PATH, not hashed)";
+                try { _ = FfmpegBuildInfo(); }
+                catch { }
+            });
         }
-        catch (Exception ex) { sha256 = $"unreadable ({ex.Message})"; }
-
-        return (version, buildconf, sha256);
+        catch { }
     }
 
     private static readonly object _buildInfoLogLock = new();

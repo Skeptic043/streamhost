@@ -60,6 +60,7 @@ internal static class Program
 
             Util.ConsoleMirror.Install();
             InstallCrashLogging();
+            Encode.FfmpegEncoder.WarmBuildInfo();
             System.Windows.Forms.Application.SetHighDpiMode(System.Windows.Forms.HighDpiMode.SystemAware);
             System.Windows.Forms.Application.EnableVisualStyles();
             System.Windows.Forms.Application.SetCompatibleTextRenderingDefault(false);
