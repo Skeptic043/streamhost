@@ -36,6 +36,8 @@ public sealed class ScreenCapture : ICaptureSource
     public int Height { get; }
     public uint GpuVendorId { get; }
     public string AdapterName { get; } = "?";
+    public string AdapterLuid { get; } = "?";
+    public string DriverVersion { get; } = "?";
     public long FramesArrived => Interlocked.Read(ref _framesArrived);
 
     /// <summary>First exception thrown inside the frame callback, if any — a set value
@@ -81,8 +83,6 @@ public sealed class ScreenCapture : ICaptureSource
 
         // Capture adapter identity for the init log — on hybrid/multi-GPU boxes the
         // capture adapter need not be the render or encoder adapter.
-        string adapterLuid = "?";
-        string driverVersion = "?";
         using (var dxgiDevice = _device.QueryInterface<IDXGIDevice>())
         using (var adapter = dxgiDevice.GetAdapter())
         {
@@ -94,13 +94,13 @@ public sealed class ScreenCapture : ICaptureSource
             {
                 using var adapter1 = adapter.QueryInterface<IDXGIAdapter1>();
                 var luid = adapter1.Description1.Luid;
-                adapterLuid = $"{luid.HighPart}:{luid.LowPart}";
+                AdapterLuid = $"{luid.HighPart}:{luid.LowPart}";
                 if (adapter1.CheckInterfaceSupport(typeof(IDXGIDevice), out long umd))
-                    driverVersion = $"{(umd >> 48) & 0xFFFF}.{(umd >> 32) & 0xFFFF}.{(umd >> 16) & 0xFFFF}.{umd & 0xFFFF}";
+                    DriverVersion = $"{(umd >> 48) & 0xFFFF}.{(umd >> 32) & 0xFFFF}.{(umd >> 16) & 0xFFFF}.{umd & 0xFFFF}";
             }
             catch { /* diagnostics only — never fail capture over adapter identity */ }
         }
-        Console.WriteLine($"[capture] adapter: {AdapterName}, Windows {Environment.OSVersion.Version}, LUID {adapterLuid}, driver {driverVersion}");
+        Console.WriteLine($"[capture] adapter: {AdapterName}, Windows {Environment.OSVersion.Version}, LUID {AdapterLuid}, driver {DriverVersion}");
 
         _winrtDevice = D3DInterop.CreateWinRtDevice(_device);
         _item = item;

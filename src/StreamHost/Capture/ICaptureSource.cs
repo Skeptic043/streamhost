@@ -11,6 +11,8 @@ public interface ICaptureSource : IDisposable
     int Height { get; }
     uint GpuVendorId { get; }
     string AdapterName { get; }
+    string AdapterLuid { get; }
+    string DriverVersion { get; }
 
     /// <summary>Monotonic frame counter — compare across calls to detect fresh content.</summary>
     long FrameVersion { get; }

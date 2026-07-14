@@ -312,9 +312,9 @@ internal static class Program
         if (encoderFailed && opts.Encoder != "libx264")
         {
             Console.WriteLine("[encoder] GPU encoder produced no video; restarting with the CPU encoder (libx264)…");
-            // Auto mode trusts a cached probe verdict; a live stall just disproved
-            // it, so drop the cache to force a fresh probe next launch. Explicit
-            // encoder mode never touched the cache, so there is nothing to clear.
+            // Watchdog-detected GPU stalls clear any prior positive verdict at the
+            // detection site. Keep this Auto-only call for unexpected ffmpeg exits,
+            // which reach the same fallback without passing through the watchdog.
             if (string.IsNullOrEmpty(opts.Encoder) || opts.Encoder == "auto")
                 StreamHost.Encode.FfmpegEncoder.InvalidateProbeCache();
             // libx264 at 1440p and up may not sustain the same resolution/fps the

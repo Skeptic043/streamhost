@@ -130,7 +130,7 @@ public sealed class FfmpegEncoder : IDisposable
             if (File.Exists(CachePath))
             {
                 File.Delete(CachePath);
-                Console.WriteLine("[encoder] cleared the cached probe verdict; the next launch re-probes the GPU encoder.");
+                Console.WriteLine("[encoder] cleared the cached probe verdict; the next Auto launch re-probes the GPU encoder.");
             }
         }
         catch { }
@@ -139,7 +139,8 @@ public sealed class FfmpegEncoder : IDisposable
     /// <summary>Picks the hardware encoder for this GPU vendor, then PROVES it can
     /// actually encode (drivers lie; being compiled into ffmpeg proves nothing).
     /// Falls back to CPU x264 so the stream starts on any machine.</summary>
-    public static string PickEncoder(uint gpuVendorId, string? requested)
+    public static string PickEncoder(
+        uint gpuVendorId, string adapterLuid, string driverVersion, string? requested)
     {
         if (!string.IsNullOrEmpty(requested) && requested != "auto") return requested;
 
@@ -151,10 +152,10 @@ public sealed class FfmpegEncoder : IDisposable
         // Failures are deliberately not cached — a driver hiccup shouldn't
         // condemn the machine to CPU encoding forever.
         string cachePath = CachePath;
-        string token = ExpectedProbeToken(gpuVendorId);
+        string? token = ExpectedProbeToken(gpuVendorId, adapterLuid, driverVersion);
         try
         {
-            if (File.Exists(cachePath) && File.ReadAllText(cachePath).Trim() == token)
+            if (token is not null && File.Exists(cachePath) && File.ReadAllText(cachePath).Trim() == token)
                 return preferred;
         }
         catch { }
@@ -167,8 +168,11 @@ public sealed class FfmpegEncoder : IDisposable
 
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
-            File.WriteAllText(cachePath, token);
+            if (token is not null)
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
+                File.WriteAllText(cachePath, token);
+            }
         }
         catch { }
         return preferred;
@@ -189,12 +193,61 @@ public sealed class FfmpegEncoder : IDisposable
     /// now, in the exact form it writes to encoder.cache. A support bundle prints
     /// this next to the cached file so a report shows whether the cached "passed"
     /// verdict still matches the current adapter.
-    /// Token version: bump when the probe changes so stale "passed" verdicts
-    /// (e.g. an AMD card that cleared the old trivial 320x240 test but stalls on
-    /// real content) get re-evaluated. v3: probe now uses the real encoder options
-    /// (EncoderOpts) and AMF dropped -usage lowlatency.</summary>
-    public static string ExpectedProbeToken(uint gpuVendorId) =>
-        $"v3:{gpuVendorId:X}:{PreferredEncoder(gpuVendorId)}";
+    /// Token version: bump when the probe changes. The identity digest changes
+    /// automatically with its inputs, so stale "passed" verdicts (e.g. an AMD
+    /// card that cleared the old trivial 320x240 test but stalls on
+    /// real content) get re-evaluated. v4 binds a pass to the capture adapter LUID,
+    /// installed UMD driver, and the exact ffmpeg binary/build. Null means some
+    /// identity could not be read, so caching fails closed and the probe runs.</summary>
+    public static string? ExpectedProbeToken(
+        uint gpuVendorId, string adapterLuid, string driverVersion)
+    {
+        string encoder = PreferredEncoder(gpuVendorId);
+        if (encoder == "libx264" || !IdentityKnown(adapterLuid) || !IdentityKnown(driverVersion))
+            return null;
+
+        return ExpectedProbeToken(gpuVendorId, adapterLuid, driverVersion, FfmpegBuildInfo());
+    }
+
+    /// <summary>Builds the same cache token from ffmpeg identity already read by
+    /// the caller. Used by support-bundle generation so its UI continuation never
+    /// launches ffmpeg or hashes the binary a second time.</summary>
+    public static string? ExpectedProbeToken(
+        uint gpuVendorId, string adapterLuid, string driverVersion,
+        (string version, string buildconf, string sha256) ffmpeg)
+    {
+        string encoder = PreferredEncoder(gpuVendorId);
+        if (encoder == "libx264" || !IdentityKnown(adapterLuid) || !IdentityKnown(driverVersion))
+            return null;
+
+        var (version, buildconf, sha256) = ffmpeg;
+        if (!IdentityKnown(version) || !IdentityKnown(buildconf) ||
+            sha256.Length != 16 || !sha256.All(Uri.IsHexDigit))
+            return null;
+
+        string identity = string.Join('\n',
+            "probe=v4",
+            $"vendor={gpuVendorId:X}",
+            $"encoder={encoder}",
+            $"adapter={adapterLuid}",
+            $"driver={driverVersion}",
+            $"ffmpeg-version={version}",
+            $"ffmpeg-build={buildconf}",
+            $"ffmpeg-sha256={sha256}");
+        string digest = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(identity)))
+            .ToLowerInvariant();
+        return $"v4:{gpuVendorId:X}:{encoder}:{digest}";
+    }
+
+    private static bool IdentityKnown(string? value) =>
+        !string.IsNullOrWhiteSpace(value) && value != "?" &&
+        !value.Equals("unknown", StringComparison.OrdinalIgnoreCase) &&
+        !value.Equals("timed out", StringComparison.OrdinalIgnoreCase) &&
+        !value.Equals("no output", StringComparison.OrdinalIgnoreCase) &&
+        !value.StartsWith("not runnable", StringComparison.OrdinalIgnoreCase) &&
+        !value.StartsWith("unreadable", StringComparison.OrdinalIgnoreCase) &&
+        !value.StartsWith("(resolved via PATH", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Version line, full build configuration, and a short binary hash of
     /// the ffmpeg at <see cref="FfmpegPath"/>. Reusable by the support bundle (and

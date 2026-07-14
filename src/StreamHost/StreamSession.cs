@@ -70,12 +70,19 @@ public sealed class StreamSession
     private readonly Lock _audioGate = new();
     private Audio.ProcessAudioCapture? _audioCapture;
     private volatile bool _encoderStalled;
+    private volatile CaptureAdapterIdentity? _captureAdapter;
 
     public Broadcaster? Broadcaster { get; private set; }
     public string? Description { get; private set; }
 
     /// <summary>The encoder actually running (after auto-pick and probe), e.g. "h264_nvenc".</summary>
     public string? ActiveEncoder { get; private set; }
+
+    /// <summary>Adapter identity captured from the source that selected the encoder.
+    /// Published as one immutable reference so support diagnostics cannot mix fields
+    /// from different initialization moments.</summary>
+    public sealed record CaptureAdapterIdentity(uint VendorId, string Luid, string DriverVersion);
+    public CaptureAdapterIdentity? CaptureAdapter => _captureAdapter;
 
     /// <summary>Resolved output pixel size (native honored), so a CPU-fallback site
     /// knows the real resolution even when the config asked for native (OutHeight==0).</summary>
@@ -174,6 +181,7 @@ public sealed class StreamSession
             : _config.CompatibilityCapture
                 ? new DuplicationCapture(_config.MonitorHandle)
                 : new AutoMonitorCapture(_config.MonitorHandle);
+        _captureAdapter = new(capture.GpuVendorId, capture.AdapterLuid, capture.DriverVersion);
         if (_config.NoCursor) capture.CursorEnabled = false;
         Console.WriteLine($"[capture] {_config.SourceName} @ {capture.Width}x{capture.Height}, GPU vendor 0x{capture.GpuVendorId:X4}{(_config.NoCursor ? ", cursor off" : "")}");
 
@@ -189,7 +197,8 @@ public sealed class StreamSession
             outH = capture.Height & ~1;
         }
 
-        string encoder = FfmpegEncoder.PickEncoder(capture.GpuVendorId, _config.Encoder);
+        string encoder = FfmpegEncoder.PickEncoder(
+            capture.GpuVendorId, capture.AdapterLuid, capture.DriverVersion, _config.Encoder);
         ActiveEncoder = encoder;
         OutputWidth = outW;
         OutputHeight = outH;
@@ -346,25 +355,22 @@ public sealed class StreamSession
             if (!broadcaster.WaitForInit(TimeSpan.FromSeconds(10), ct))
             {
                 if (ct.IsCancellationRequested) return;
-                _encoderStalled = true;
-                Console.Error.WriteLine($"[encoder] {ffmpeg.EncoderName} produced no output at all in 10s; the encoder is stalled.");
-                _cts.Cancel();
+                ReportEncoderStall(ffmpeg,
+                    $"[encoder] {ffmpeg.EncoderName} produced no output at all in 10s; the encoder is stalled.");
                 return;
             }
             long baseline = Interlocked.Read(ref broadcaster.FragmentsSent);
             bool firstWindow = true;
-            while (!ct.WaitHandle.WaitOne(firstWindow ? 5000 : 10000))
+            while (!ct.WaitHandle.WaitOne(5000))
             {
                 long total = Interlocked.Read(ref broadcaster.FragmentsSent);
                 long produced = total - baseline;
                 baseline = total;
                 if (firstWindow ? produced < 5 : produced == 0)
                 {
-                    _encoderStalled = true;
-                    Console.Error.WriteLine(firstWindow
+                    ReportEncoderStall(ffmpeg, firstWindow
                         ? $"[encoder] {ffmpeg.EncoderName} wrote the header but produced almost no video in 5s; the encoder is stalling."
                         : $"[encoder] {ffmpeg.EncoderName} stopped producing video mid-stream; the encoder has stalled.");
-                    _cts.Cancel();
                     return;
                 }
                 firstWindow = false;
@@ -381,6 +387,20 @@ public sealed class StreamSession
         _cts.Cancel();
         try { Task.WaitAll(new[] { splitterTask, serverTask }, 3000); } catch { }
         return exitReason; // audioTeardown finishes the audio cleanup on the way out
+    }
+
+    private void ReportEncoderStall(FfmpegEncoder ffmpeg, string diagnostic)
+    {
+        _encoderStalled = true;
+        Console.Error.WriteLine(diagnostic);
+        if (ffmpeg.EncoderName != "libx264")
+        {
+            Console.Error.WriteLine("[encoder] Starting a one-time recovery attempt with the CPU encoder (libx264).");
+            // An explicit GPU run can still disprove a positive verdict left by an
+            // earlier Auto run. Always make the next Auto start probe this GPU again.
+            FfmpegEncoder.InvalidateProbeCache();
+        }
+        _cts.Cancel();
     }
 
     private string PacingLoop(ICaptureSource capture, FfmpegEncoder ffmpeg, Broadcaster broadcaster,

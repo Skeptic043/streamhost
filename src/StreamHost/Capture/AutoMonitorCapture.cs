@@ -35,6 +35,8 @@ public sealed class AutoMonitorCapture : ICaptureSource
     public int Height { get; }
     public uint GpuVendorId { get; }
     public string AdapterName { get; }
+    public string AdapterLuid { get; }
+    public string DriverVersion { get; }
 
     public AutoMonitorCapture(IntPtr hMonitor)
     {
@@ -55,6 +57,8 @@ public sealed class AutoMonitorCapture : ICaptureSource
         Height = _active.Height;
         GpuVendorId = _active.GpuVendorId;
         AdapterName = _active.AdapterName;
+        AdapterLuid = _active.AdapterLuid;
+        DriverVersion = _active.DriverVersion;
 
         _watchdog = new Thread(WatchdogLoop) { IsBackground = true, Name = "capture-watchdog" };
         _watchdog.Start();

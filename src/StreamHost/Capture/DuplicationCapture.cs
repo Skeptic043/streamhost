@@ -45,6 +45,8 @@ public sealed class DuplicationCapture : ICaptureSource
     public int Height { get; }
     public uint GpuVendorId { get; }
     public string AdapterName { get; } = "?";
+    public string AdapterLuid { get; } = "?";
+    public string DriverVersion { get; } = "?";
     public long FrameVersion => Interlocked.Read(ref _framesArrived);
     public long FramesArrived => Interlocked.Read(ref _framesArrived);
     public Exception? CaptureError => _captureError;
@@ -85,23 +87,21 @@ public sealed class DuplicationCapture : ICaptureSource
         {
             // Capture adapter identity for the init log — on hybrid/multi-GPU boxes the
             // capture adapter need not be the render or encoder adapter.
-            string adapterLuid = "?";
-            string driverVersion = "?";
             try
             {
                 AdapterName = foundAdapter.Description1.Description;
                 GpuVendorId = (uint)foundAdapter.Description1.VendorId;
                 var luid = foundAdapter.Description1.Luid;
-                adapterLuid = $"{luid.HighPart}:{luid.LowPart}";
+                AdapterLuid = $"{luid.HighPart}:{luid.LowPart}";
                 // Best-effort UMD driver version, decoded from the packed long into the
                 // conventional four 16-bit fields — a diagnostics read must never throw
                 // out of the constructor or fail capture.
                 try
                 {
                     if (foundAdapter.CheckInterfaceSupport(typeof(IDXGIDevice), out long umd))
-                        driverVersion = $"{(umd >> 48) & 0xFFFF}.{(umd >> 32) & 0xFFFF}.{(umd >> 16) & 0xFFFF}.{umd & 0xFFFF}";
+                        DriverVersion = $"{(umd >> 48) & 0xFFFF}.{(umd >> 32) & 0xFFFF}.{(umd >> 16) & 0xFFFF}.{umd & 0xFFFF}";
                 }
-                catch { driverVersion = "?"; }
+                catch { }
 
                 D3D11.D3D11CreateDevice(
                     foundAdapter, DriverType.Unknown, DeviceCreationFlags.BgraSupport,
@@ -140,7 +140,7 @@ public sealed class DuplicationCapture : ICaptureSource
                 foundAdapter.Dispose();
             }
 
-            Console.WriteLine($"[capture] desktop duplication on {AdapterName}, {Width}x{Height}, LUID {adapterLuid}, driver {driverVersion}");
+            Console.WriteLine($"[capture] desktop duplication on {AdapterName}, {Width}x{Height}, LUID {AdapterLuid}, driver {DriverVersion}");
 
             var desc = new Texture2DDescription
             {

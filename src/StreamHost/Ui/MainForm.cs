@@ -678,9 +678,9 @@ public sealed class MainForm : Form
                         _retriedCpu = true;
                         _pendingCpuRetry = true;
                         AppendLog("GPU encoder produced no video; restarting with the CPU encoder (libx264)…");
-                        // Auto mode trusts a cached probe verdict; a live stall just
-                        // disproved it, so drop the cache to force a fresh probe next
-                        // launch. Explicit encoder mode never cached, so nothing to clear.
+                        // Watchdog-detected GPU stalls clear any prior positive verdict
+                        // immediately. Keep this Auto-only call for unexpected ffmpeg
+                        // exits, which reach fallback without passing through the watchdog.
                         if (string.IsNullOrEmpty(config.Encoder) || config.Encoder == "auto")
                             StreamHost.Encode.FfmpegEncoder.InvalidateProbeCache();
                         // libx264 at 1440p and up may not sustain the same resolution/fps
@@ -1479,23 +1479,45 @@ public sealed class MainForm : Form
     {
         try
         {
-            // The tailscale CLI can block for seconds; keep it off the UI thread.
-            // ffmpeg -version + the binary hash also shell out, so batch them too.
-            string tailnet = await Task.Run(() => RedactPeerNames(Util.StreamDiscovery.DescribeTailnetPaths()));
-            var ffmpeg = await Task.Run(Encode.FfmpegEncoder.FfmpegBuildInfo);
-            var gpu = PrimaryGpu();
+            // Capture the active session identity as one immutable reference, then
+            // keep every CLI/DXGI/hash operation off the UI thread. A missing active
+            // identity falls back honestly to the first hardware adapter.
+            var activeCapture = _session?.CaptureAdapter;
+            var diagnostics = await Task.Run(() =>
+            {
+                string tailnet = RedactPeerNames(Util.StreamDiscovery.DescribeTailnetPaths());
+                string gpus = string.Join("; ", GpuAdapters());
+                var ffmpeg = Encode.FfmpegEncoder.FfmpegBuildInfo();
+                (uint vendorId, string luid, string driver) gpu;
+                string gpuSource;
+                if (activeCapture is not null)
+                {
+                    gpu = (activeCapture.VendorId, activeCapture.Luid, activeCapture.DriverVersion);
+                    gpuSource = "active capture adapter";
+                }
+                else
+                {
+                    gpu = PrimaryGpu();
+                    gpuSource = "primary adapter fallback";
+                }
+                string expected = Encode.FfmpegEncoder.ExpectedProbeToken(
+                    gpu.vendorId, gpu.luid, gpu.driver, ffmpeg)
+                    ?? "(identity incomplete; probe will run)";
+                return (tailnet, gpus, ffmpeg, gpu, gpuSource, expected);
+            });
             var sb = new System.Text.StringBuilder();
             sb.AppendLine($"StreamHost {AppVersion()}");
             sb.AppendLine($"Windows:  {Environment.OSVersion.VersionString}");
-            sb.AppendLine($"GPUs:     {string.Join("; ", GpuAdapters())}");
-            sb.AppendLine($"ffmpeg:   {ffmpeg.version}");
-            sb.AppendLine($"ffmpeg build: {ffmpeg.buildconf}");
-            sb.AppendLine($"ffmpeg sha256: {ffmpeg.sha256}");
-            sb.AppendLine($"tailnet:  {tailnet}");
+            sb.AppendLine($"GPUs:     {diagnostics.gpus}");
+            sb.AppendLine($"ffmpeg:   {diagnostics.ffmpeg.version}");
+            sb.AppendLine($"ffmpeg build: {diagnostics.ffmpeg.buildconf}");
+            sb.AppendLine($"ffmpeg sha256: {diagnostics.ffmpeg.sha256}");
+            sb.AppendLine($"tailnet:  {diagnostics.tailnet}");
             sb.AppendLine($"enc cache: {ReadSmallFile(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "StreamHost", "encoder.cache"))}");
-            // Expected token for the current adapter — a report can compare it to
-            // the cached verdict above to spot a stale probe.
-            sb.AppendLine($"enc expected: {Encode.FfmpegEncoder.ExpectedProbeToken(gpu.vendorId)}  (adapter LUID {gpu.luid}, driver {gpu.driver})");
+            // A report can compare this to the cached verdict above. During a live
+            // session it describes the exact capture adapter supplied to encoder selection;
+            // while idle the label makes the primary-adapter fallback explicit.
+            sb.AppendLine($"enc expected: {diagnostics.expected}  ({diagnostics.gpuSource}, adapter LUID {diagnostics.gpu.luid}, driver {diagnostics.gpu.driver})");
             sb.AppendLine($"session:  {DescribeSessionState()}");
             sb.AppendLine($"settings: {ReadSmallFile(SettingsPath)}");
             sb.AppendLine("---- last 200 log lines ----");
