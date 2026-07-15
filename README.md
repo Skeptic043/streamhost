@@ -1,62 +1,57 @@
 # StreamHost
 
-StreamHost streams a monitor or a single window from a Windows PC to other
-people's browsers. It was built for private game streaming in a small group:
-you run one exe, people you choose open a link, and that's the whole setup.
-Transport is WebSocket, playback is MSE. No WebRTC or signaling server.
-StreamHost itself has no account system or cloud relay.
+StreamHost streams a monitor or a single window from a Windows PC over
+Tailscale or LAN to a modern browser or the built-in Watch window. It was
+built for private streaming in a small group: you run one exe, people you
+choose open a link, and you're done. Transport is WebSocket and playback is
+MSE, with no WebRTC, signaling server, StreamHost account, or cloud relay.
 
-Once network access is in place, viewers watch in a browser with no StreamHost
-viewer app or extension. Firefox and Chrome both work, including with privacy
-addons, which is a big part of why this exists.
+Once network access is in place, viewers can watch in a modern browser or
+through the StreamHost Watch window.
 
 ## What it does
 
-- Streams a whole monitor or a single window, your choice. Monitor capture
+- Streams a whole monitor or a single window. Monitor capture
   uses desktop duplication for full-rate capture and includes the cursor.
-  Some exclusive-fullscreen games still need borderless mode.
-- Streams the audio of whichever app you pick (the captured game, another
-  app, or nothing). Your voice chat is not part of the capture unless you
-  deliberately select it.
+  Some exclusive-fullscreen applications still need borderless mode, and a
+  few cannot be captured at all. Amnesia: The Bunker is one known example.
+- Streams audio from one application you pick, or nothing. Full desktop audio
+  and multiple audio sources are currently not supported.
 - Hardware encoding on NVIDIA (NVENC), AMD (AMF), and Intel (QSV), with
-  automatic fallback to CPU encoding if the GPU encoder fails or stalls
-  mid-stream. Presets from 720p30 to 1440p60 plus Native, with a separate
-  low/medium/high bitrate picker that always shows the actual Mbps, so you
-  know what you're sending before you start.
+  automatic fallback to CPU encoding if the GPU encoder fails or stalls.
+  Presets run from 720p30 to 1440p60 plus Native, with a separate
+  low/medium/high bitrate picker that shows the Mbps so you can see the
+  upload cost before starting.
 - Every stream gets a random viewer key baked into the link, so a stale or
-  guessed link does not work. The Security section below spells out exactly
-  what the key does and does not protect.
+  guessed link does not work. The Security section explains this further.
 - A grid page tiles several streams in one tab, and the built-in Watch
-  window shows the same grid without a browser, with one-click discovery of
-  other StreamHost machines on your Tailscale network.
+  window shows the same grid without a browser. It automatically searches
+  for live StreamHost machines it can discover on your Tailscale network.
 - While the app is open but not streaming, the link serves a "not streaming
   yet" page that connects on its own when you start. The Watch window checks
   your tailnet in the background and plays one soft chime when a stream you
-  aren't already watching goes live; the bell button in the grid header
+  aren't already watching goes live. The bell button in the grid header
   turns that off.
 
 ## Requirements
 
-- Hosting: Windows 10/11, x64. No install, the release zip is
-  self-contained.
+- Hosting: Windows 10/11, x64. No install; the release zip is self-contained.
 - Watching: any modern browser on any OS. Linux and Mac can watch, they
   just can't host.
 
 ## Quick start
 
-1. Download the latest release zip from the Releases page, unzip it
-   anywhere, run StreamHost.exe.
+1. Download the latest release zip from the Releases page, unzip it into a
+   folder anywhere, and run StreamHost.exe.
 2. Pick what to share and a quality preset, click Start streaming.
 3. Click Copy link and send it to whoever is watching. For someone who is
    only on your LAN, use the small arrow next to it and choose Copy LAN link.
 4. If someone can't connect, click "Open port" in the app. It asks for
-   administrator approval and opens that stream port. For LAN-only viewing,
-   tick "Allow LAN viewers" first; otherwise access stays Tailscale-only.
+   administrator approval and opens that stream port. To also allow LAN
+   viewing, tick "Allow LAN viewers" before clicking "Open port".
 
 If you prefer a script, running setup.bat as administrator sets up
-Tailscale-only access for that port.
-
-For watching over the internet, see the next section.
+Tailscale-only access for port 8093 by default.
 
 Note on links: each stream start generates a new viewer key, so the link
 changes when you restart a stream. Viewers who joined your tailnet pick up
@@ -72,22 +67,21 @@ with no port forwarding.
 
 One-time setup on the hosting PC:
 
-1. Go to tailscale.com, create a free account (it signs in with Google,
+1. Go to tailscale.com, create a free account (you can sign in with Google,
    Microsoft, GitHub, or Apple).
 2. Install Tailscale on the hosting PC and sign in. The PC gets a stable
    address that starts with 100.x.
-3. Start a stream and use Copy link. StreamHost prefers the Tailscale
-   address automatically, so the link works from anywhere.
+3. Start streaming.
 
-Then connect your viewers. There are two ways, and which one fits depends
-on the person.
+For connecting as a viewer, there are two ways. Which one fits depends on
+the person.
 
 ### Viewers who just watch: share your PC with them
 
 This is the way to go for most viewers. They keep their own Tailscale
-account and network, nothing about their setup changes, and they do not
-count against your account's user limit.
-Tailscale currently labels machine sharing as beta.
+account and network instead of joining yours, nothing about their setup
+changes, and they do not count against your account's user limit. Tailscale
+currently labels machine sharing as beta.
 
 1. The viewer creates their own free Tailscale account and installs
    Tailscale on their machine.
@@ -96,7 +90,9 @@ Tailscale currently labels machine sharing as beta.
    invite it gives you to the viewer privately.
 3. The viewer accepts the invite. Your PC now shows up in their Tailscale
    as a shared machine.
-4. You send them the stream link.
+4. You send them the stream link. If they have StreamHost installed, opening
+   Watch automatically searches for reachable live streams, so a discoverable
+   host appears there without pasting its link.
 
 Sharing is one-way: they can reach your PC, your PC cannot reach their
 devices. To stop sharing later, remove them from the same menu.
@@ -110,11 +106,12 @@ Everyone on the same network can find each other's streams with Find
 streams in the Watch window, and picks up rotated viewer keys
 automatically.
 
-If an invited person already uses Tailscale for something else: a device
-is only active on one network at a time, but the app supports multiple
-accounts. Click the Tailscale tray icon, click the account name, then
-"Add account" and sign in with the invited account. Switching networks is
-two clicks after that. Viewers you shared your PC with skip this
+If an invited person already uses Tailscale for something else, a device
+can only be active on one network at a time, but the Tailscale app supports
+multiple accounts. They can click the Tailscale tray icon, click the account
+name, choose "Add account," and sign in with the invited account. Switching
+back is as simple as selecting their previous account from the tray app.
+Viewers you shared your PC with skip this
 entirely, which is one reason sharing is the default recommendation.
 
 Tailscale specifics beyond that (ACLs and so on) are documented by
@@ -133,10 +130,9 @@ already see this same grid, with a stream finder built in.
 The model in plain terms, so you can decide whether it fits your use:
 
 - **What can reach the host.** Out of the box, the stream port accepts only
-  Tailscale addresses, and nothing is reachable from the public internet:
-  no public endpoint, no relay, no port forwarding. Local network access is
-  an explicit opt-in. Tick "Allow LAN viewers" and click "Open port" to let
-  the port accept your local network too.
+  Tailscale addresses, and nothing is reachable from the public internet.
+  LAN access is an explicit opt-in. Tick "Allow LAN viewers" and click
+  "Open port" to let the port accept your local network.
 - **What the viewer key does.** Each stream start generates a random key
   that becomes part of the link. The stream page and the video itself
   require it, so a bare address or an old link does not work. The status
@@ -155,11 +151,11 @@ The model in plain terms, so you can decide whether it fits your use:
   not own it exclusively; another VPN or a carrier-grade NAT setup that
   puts addresses from it on your machine would receive the same trust.
   Keep that in mind if you run one.
-- **What Copy log shares.** The support bundle scrubs viewer keys, your
+- **What Copy log shares.** The "Copy log" button scrubs viewer keys, your
   Windows user name, file paths, and Tailscale addresses before anything
   reaches the clipboard. It keeps the machine name, stream name, and app
-  names, since reports are rarely debuggable without them. Skim it before
-  posting if that matters to you.
+  names, since reports are rarely debuggable without them. The files opened
+  through "Open logs" are not scrubbed.
 
 ## Common issues
 
@@ -180,28 +176,29 @@ The model in plain terms, so you can decide whether it fits your use:
   on the same port.
 - A fullscreen game shows a frozen frame: share the whole monitor instead
   of the window, or set the game to borderless. Some exclusive-fullscreen
-  setups can't be captured by anything.
+  setups cannot be captured by anything. Amnesia: The Bunker is one known
+  example.
 - Smooth on one browser, choppy on another: check that the browser's
-  hardware acceleration is on. Add `&stats=1` to the end of the link for a
-  diagnostics overlay.
+  hardware acceleration is on. Add `&stats=1` to the end of the link or
+  click the green LIVE badge for a diagnostics overlay.
 - A 60 fps window share reports lower source fps: Windows window capture can
   deliver fewer fresh frames on some systems. Share the whole monitor for the
   full-rate capture path.
 - Anything else: "Copy log" in the app puts the log plus version, system,
-  GPU, and encoder info on the clipboard. Open an issue and paste it.
+  GPU, and encoder info on the clipboard. Feel free to open an issue and
+  paste the copied report for troubleshooting.
 
 ## FAQ
 
 **Is it free?** Yes, for noncommercial use. See the license note below.
 
 **Why not just use Discord screen share?** Quality and control. StreamHost
-sends the bitrate you ask for, captures the audio of one app instead of
-your whole desktop, and viewers watch in a plain browser tab they can
-fullscreen on any monitor.
+gives you direct bitrate and quality controls without requiring a
+subscription, and viewers can fullscreen a plain browser tab on any monitor.
 
-**Does it stream my voice chat?** No. Audio comes from the one app you
-pick in the Audio dropdown. Discord, or any other app you didn't pick, is
-excluded by construction.
+**Does it include my microphone or voice chat?** StreamHost does not capture
+your microphone. Audio comes from the one app you pick in the Audio dropdown.
+Any other app you did not pick, including Discord, is excluded.
 
 **The stream audio is quiet or silent even though the app is playing.**
 Check that app's volume in the Windows volume mixer. The capture taps the
