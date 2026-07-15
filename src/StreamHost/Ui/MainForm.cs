@@ -178,6 +178,13 @@ public sealed class MainForm : Form
     [DllImport("user32.dll")]
     private static extern bool IsWindow(IntPtr hwnd);
 
+    [DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam);
+
+    private const int WmSetRedraw = 0x000B;
+    private const int EmGetFirstVisibleLine = 0x00CE;
+    private const int EmLineScroll = 0x00B6;
+
     // The holding page: served while the app is open but no stream is running,
     // so links opened early (or left over from a previous stream) show
     // "not streaming yet" and connect themselves once a stream starts.
@@ -1761,8 +1768,43 @@ public sealed class MainForm : Form
 
     private void AppendLog(string line)
     {
-        if (_logBox.TextLength > 200_000) _logBox.Clear();
-        _logBox.AppendText(line + Environment.NewLine);
+        if (_logBox.TextLength > 200_000)
+        {
+            _logBox.Clear();
+            _logBox.AppendText(line + Environment.NewLine);
+            return;
+        }
+
+        int bottomChar = _logBox.GetCharIndexFromPosition(
+            new Point(0, Math.Max(0, _logBox.ClientSize.Height - 1)));
+        int lastVisibleLine = _logBox.GetLineFromCharIndex(bottomChar);
+        int lastLine = _logBox.GetLineFromCharIndex(_logBox.TextLength);
+        if (lastVisibleLine >= lastLine - 1)
+        {
+            _logBox.AppendText(line + Environment.NewLine);
+            return;
+        }
+
+        int selectionStart = _logBox.SelectionStart;
+        int selectionLength = _logBox.SelectionLength;
+        int firstVisibleLine = (int)SendMessage(
+            _logBox.Handle, EmGetFirstVisibleLine, IntPtr.Zero, IntPtr.Zero);
+
+        SendMessage(_logBox.Handle, WmSetRedraw, IntPtr.Zero, IntPtr.Zero);
+        try
+        {
+            _logBox.AppendText(line + Environment.NewLine);
+            _logBox.Select(selectionStart, selectionLength);
+            int currentFirstVisibleLine = (int)SendMessage(
+                _logBox.Handle, EmGetFirstVisibleLine, IntPtr.Zero, IntPtr.Zero);
+            SendMessage(_logBox.Handle, EmLineScroll, IntPtr.Zero,
+                new IntPtr(firstVisibleLine - currentFirstVisibleLine));
+        }
+        finally
+        {
+            SendMessage(_logBox.Handle, WmSetRedraw, new IntPtr(1), IntPtr.Zero);
+            _logBox.Invalidate();
+        }
     }
 
     private static string Truncate(string s, int max) => s.Length <= max ? s : s[..(max - 1)] + "…";

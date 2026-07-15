@@ -210,7 +210,7 @@ public sealed class WatchForm : Form
             var streams = await StreamDiscovery.FindAsync([8093, _extraPort], _closeCts.Token);
             if (IsDisposed || Disposing || _closeCts.IsCancellationRequested) return;
             await PushFinderAsync(streams,
-                streams.Count == 0 ? "no live streams found on your tailnet" : "");
+                streams.Count == 0 ? "no live streams found" : "");
             await ObserveStreamsAsync(streams, automatic);
         }
         catch (OperationCanceledException) when (_closeCts.IsCancellationRequested)

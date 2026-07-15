@@ -119,7 +119,9 @@ public sealed class StreamSession
             }
             finally
             {
-                Console.WriteLine($"[shutdown] stopped: {reason}");
+                Console.WriteLine(reason == "stopped"
+                    ? "[shutdown] done"
+                    : $"[shutdown] stopped: {reason}");
                 Stopped?.Invoke(reason);
             }
         })
@@ -476,9 +478,6 @@ public sealed class StreamSession
                 broadcaster.SourceFps = (int)Math.Round((capture.FramesArrived - lastCompositorFrames) / windowSec);
                 broadcaster.DupPercent = (int)Math.Round(dupPct);
                 lastCompositorFrames = capture.FramesArrived;
-                // "pacing slips", not "resyncs": the viewer fell-behind message in
-                // Broadcaster also says resync, and the two kept getting conflated.
-                Console.WriteLine($"[stats] fresh {freshCount} dup {dupCount} ({dupPct:F1}%), pacing slips {pacingSlips}, source {broadcaster.SourceFps} fps, viewers {broadcaster.ViewerCount}");
                 freshCount = dupCount = 0;
                 lastReport = now;
             }

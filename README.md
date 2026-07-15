@@ -183,25 +183,6 @@ The model in plain terms, so you can decide whether it fits your use:
 - Anything else: "Copy log" in the app puts the log plus version, system,
   GPU, and encoder info on the clipboard. Open an issue and paste it.
 
-## Reading the stats line
-
-Viewers can see a diagnostics overlay on their own screen: take the copied
-link and add `&stats=1` to the end. The link already carries `?k=...`, so
-it is an ampersand, not a question mark.
-
-The host-side log tells a similar story. While streaming, it prints a line
-like this every 10 seconds:
-
-    [stats] fresh 1499 dup 1 (0.1%), pacing slips 0, source 60 fps, viewers 2
-
-- fresh / dup: frames that carried new content vs repeats of the last one.
-  High dup on a static screen is normal (nothing on it changed). High dup
-  during motion means capture is the bottleneck, not the encoder.
-- pacing slips: times the frame clock fell behind and had to resync.
-  Should stay at 0; a climbing number means the machine is overloaded.
-- source: the rate the screen capture is actually delivering.
-- viewers: how many players are connected right now.
-
 ## FAQ
 
 **Is it free?** Yes, for noncommercial use. See the license note below.
