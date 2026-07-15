@@ -87,6 +87,7 @@ on the person.
 This is the way to go for most viewers. They keep their own Tailscale
 account and network, nothing about their setup changes, and they do not
 count against your account's user limit.
+Tailscale currently labels machine sharing as beta.
 
 1. The viewer creates their own free Tailscale account and installs
    Tailscale on their machine.
