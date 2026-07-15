@@ -2,12 +2,12 @@
 setlocal
 REM StreamHost one-time setup. Usage: setup.bat [port]   (default 8093)
 REM
-REM This is the manual fallback for the app's "Fix access" button. It just
+REM This is the manual fallback for the app's "Open port" button. It just
 REM elevates and hands the work to StreamHost.exe, which reserves the stream
 REM URL for this user and opens the firewall to Tailscale (100.64.0.0/10).
 REM
 REM LAN viewers are not offered here. Turn that on inside the app: tick
-REM "Allow LAN viewers" next to "Fix access", then click Fix access.
+REM "Allow LAN viewers" next to "Open port", then click Open port.
 REM
 REM Right-click this file and select "Run as administrator".
 
