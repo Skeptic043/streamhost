@@ -122,7 +122,8 @@ public sealed class MainForm : Form
     private readonly ToolTip _toolTip = new();
     private readonly NumericUpDown _portInput = new() { Minimum = 1024, Maximum = 65535, Value = 8093, Width = 80 };
     private readonly Button _startButton = new() { Text = "▶  Start streaming", Width = 160, Height = 38 };
-    private readonly Button _copyButton = new() { Text = "Copy link", Width = 92, Height = 38 };
+    private readonly Button _copyButton = new() { Text = "Copy link", Width = 68, Height = 38, Margin = new Padding(3, 3, 0, 3) };
+    private readonly Button _copyMenuButton = new() { Text = "v", Width = 24, Height = 38, Margin = new Padding(0, 3, 3, 3), AccessibleName = "Copy link options" };
     private readonly Button _switchButton = new() { Text = "Switch source", Width = 112, Height = 38 };
     private readonly TextBox _linkBox = new() { ReadOnly = true, Width = 260, TextAlign = HorizontalAlignment.Center, BorderStyle = BorderStyle.FixedSingle };
     private readonly Label _statusLabel = new() { Text = "Not streaming.", AutoSize = true };
@@ -267,6 +268,7 @@ public sealed class MainForm : Form
         actionPanel.Controls.Add(_startButton);
         actionPanel.Controls.Add(_switchButton);
         actionPanel.Controls.Add(_copyButton);
+        actionPanel.Controls.Add(_copyMenuButton);
         actionPanel.Controls.Add(_watchButton);
         actionPanel.Controls.Add(_linkBox);
         _linkBox.Margin = new Padding(10, 9, 0, 0);
@@ -349,6 +351,16 @@ public sealed class MainForm : Form
         };
         _switchButton.Click += (_, _) => ShowSwitchDialog();
         _copyButton.Click += (_, _) => CopyLink(BuildUrl(""));
+        var copyMenu = new ContextMenuStrip
+        {
+            BackColor = Card,
+            ForeColor = Fg,
+            ShowImageMargin = false,
+        };
+        var copyLanItem = new ToolStripMenuItem("Copy LAN link") { BackColor = Card, ForeColor = Fg };
+        copyLanItem.Click += (_, _) => CopyLanLink();
+        copyMenu.Items.Add(copyLanItem);
+        _copyMenuButton.Click += (_, _) => copyMenu.Show(_copyMenuButton, new Point(0, _copyMenuButton.Height));
         _watchButton.Click += (_, _) => OpenWatchWindow();
         _bundleButton.Click += (_, _) => CopySupportBundle();
         _openLogsButton.Click += (_, _) => OpenLogsFolder();
@@ -1321,32 +1333,19 @@ public sealed class MainForm : Form
     /// never opened (e.g. the field was edited to a new port after the fix).</summary>
     private bool LanAppliedForPort(int port) => _allowLanApplied && port == _allowLanPort;
 
-    private string BuildUrl(string pathSuffix)
+    private int LinkPort() => _livePort > 0 ? _livePort : (int)_portInput.Value;
+
+    private bool ActiveServerIsLocalOnly() =>
+        _session is { } live ? live.LocalOnly : _idleServer?.LocalOnly == true;
+
+    private string? LanShareAddressForPort(int port) =>
+        LanAppliedForPort(port)
+            ? StreamSession.GetShareAddresses(includeLan: true)
+                .FirstOrDefault(a => !StreamSession.IsTailscaleAddress(a))
+            : null;
+
+    private string BuildViewerUrl(string host, int port, string pathSuffix)
     {
-        // Never hand out a network address the server can't actually answer on.
-        // Prefer a Tailscale address (in scope in every firewall config); fall
-        // back to a LAN address only if LAN access was actually applied; else
-        // localhost. LocalOnly (no URL ACL) forces localhost regardless: honor the
-        // live session while streaming, else the holding page's own bind so an
-        // idle localhost-only fallback isn't advertised as a network address.
-        // Port in play: the live session's while streaming, else the box the link uses.
-        int port = _livePort > 0 ? _livePort : (int)_portInput.Value;
-        string host;
-        bool localOnly = _session is { } live ? live.LocalOnly : _idleServer?.LocalOnly == true;
-        if (localOnly)
-            host = "localhost";
-        else
-        {
-            var tailscale = StreamSession.GetShareAddresses(includeLan: false);
-            if (tailscale.Count > 0)
-                host = tailscale[0];
-            else if (LanAppliedForPort(port) &&
-                     StreamSession.GetShareAddresses(includeLan: true)
-                         .FirstOrDefault(a => !StreamSession.IsTailscaleAddress(a)) is { } lan)
-                host = lan;
-            else
-                host = "localhost";
-        }
         string url = $"http://{host}:{port}/{pathSuffix}";
         // While streaming, the live session's key; while idle, the pending key the
         // next stream will accept, so a link copied now already carries ?k= and a
@@ -1356,7 +1355,54 @@ public sealed class MainForm : Form
         return url;
     }
 
+    private string BuildUrl(string pathSuffix)
+    {
+        // Never hand out a network address the server can't actually answer on.
+        // Prefer a Tailscale address (in scope in every firewall config); fall
+        // back to a LAN address only if LAN access was actually applied; else
+        // localhost. LocalOnly (no URL ACL) forces localhost regardless: honor the
+        // live session while streaming, else the holding page's own bind so an
+        // idle localhost-only fallback isn't advertised as a network address.
+        // Port in play: the live session's while streaming, else the box the link uses.
+        int port = LinkPort();
+        string host;
+        if (ActiveServerIsLocalOnly())
+            host = "localhost";
+        else
+        {
+            var tailscale = StreamSession.GetShareAddresses(includeLan: false);
+            if (tailscale.Count > 0)
+                host = tailscale[0];
+            else if (LanShareAddressForPort(port) is { } lan)
+                host = lan;
+            else
+                host = "localhost";
+        }
+        return BuildViewerUrl(host, port, pathSuffix);
+    }
+
     private void UpdateLinkBox() => _linkBox.Text = BuildUrl("");
+
+    private void CopyLanLink()
+    {
+        int port = LinkPort();
+        if (ActiveServerIsLocalOnly())
+        {
+            AppendLog($"LAN link unavailable: Fix access must succeed with Allow LAN for port {port}.");
+            return;
+        }
+        if (!LanAppliedForPort(port))
+        {
+            AppendLog($"LAN link unavailable: use Fix access with Allow LAN for port {port}.");
+            return;
+        }
+        if (LanShareAddressForPort(port) is not { } lan)
+        {
+            AppendLog("LAN link unavailable: no LAN address was found for this PC.");
+            return;
+        }
+        CopyLink(BuildViewerUrl(lan, port, ""));
+    }
 
     private void OpenWatchWindow()
     {

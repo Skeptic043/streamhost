@@ -23,6 +23,7 @@
     position: absolute; top: 10px; left: 10px; padding: 4px 10px;
     background: rgba(13,15,18,.7); border: 1px solid #2e333b; border-radius: 999px;
     font-size: 12px; color: #9aa1ab; cursor: pointer; user-select: none;
+    opacity: 0; transition: opacity .25s;
   }
   #badge .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #e05555; margin-right: 6px; }
   #badge.live .dot { background: #58c472; }
@@ -38,7 +39,11 @@
     background: rgba(13,15,18,.8); border: 1px solid #2e333b; border-radius: 999px;
     opacity: 0; transition: opacity .25s; user-select: none;
   }
-  #stage:hover #controls, #controls:focus-within { opacity: 1; }
+  #stage.ui #badge, #stage.ui #controls,
+  #badge.stats-open, #controls:focus-within { opacity: 1; }
+  @media (hover: hover) {
+    #stage:hover #badge, #stage:hover #controls { opacity: 1; }
+  }
   #controls button {
     background: none; border: none; color: #e6e8eb; font-size: 16px;
     cursor: pointer; padding: 0 2px; line-height: 1;
@@ -64,17 +69,48 @@
 
 <script>
 "use strict";
+const stage = document.getElementById("stage");
 const video = document.getElementById("video");
 const badge = document.getElementById("badge");
 const badgeText = document.getElementById("badgeText");
 const statsEl = document.getElementById("stats");
+const controls = document.getElementById("controls");
 const overlay = document.getElementById("overlay");
 const overlayMsg = document.getElementById("overlayMsg");
 
-badge.onclick = () => statsEl.classList.toggle("show");
+let uiHideTimer = null;
+function hideTouchUi() {
+  stage.classList.remove("ui");
+  const focused = document.activeElement;
+  if (controls.contains(focused) && typeof focused.blur === "function") focused.blur();
+}
+function resetUiHide() {
+  if (!stage.classList.contains("ui")) return;
+  clearTimeout(uiHideTimer);
+  uiHideTimer = setTimeout(hideTouchUi, 3000);
+}
+stage.addEventListener("pointerup", (event) => {
+  if (event.pointerType !== "touch") return;
+  stage.classList.toggle("ui");
+  if (stage.classList.contains("ui")) resetUiHide();
+  else { clearTimeout(uiHideTimer); hideTouchUi(); }
+});
+for (const element of [badge, controls, overlay]) {
+  element.addEventListener("pointerup", (event) => event.stopPropagation());
+}
+controls.addEventListener("pointerdown", resetUiHide);
+controls.addEventListener("input", resetUiHide);
+controls.addEventListener("focusin", resetUiHide);
+controls.addEventListener("click", resetUiHide);
+
+badge.onclick = (event) => {
+  event.stopPropagation();
+  statsEl.classList.toggle("show");
+  badge.classList.toggle("stats-open", statsEl.classList.contains("show"));
+};
 // Sound stays off until deliberately enabled via the chip or the hover controls —
 // clicking the video itself never changes audio.
-overlay.onclick = () => { video.play().catch(() => {}); };
+overlay.onclick = (event) => { event.stopPropagation(); video.play().catch(() => {}); };
 
 const muteBtn = document.getElementById("muteBtn");
 const volSlider = document.getElementById("volSlider");
@@ -86,7 +122,7 @@ volSlider.oninput = () => {
 };
 fsBtn.onclick = () => {
   if (document.fullscreenElement) document.exitFullscreen();
-  else document.getElementById("stage").requestFullscreen().catch(() => {});
+  else stage.requestFullscreen().catch(() => {});
 };
 video.ondblclick = fsBtn.onclick;
 setInterval(() => { muteBtn.textContent = video.muted ? "🔇" : "🔊"; }, 500);
@@ -97,7 +133,9 @@ soundChip.style.cssText = "position:absolute;top:10px;right:10px;padding:4px 12p
   "background:rgba(13,15,18,.7);border:1px solid #2e333b;border-radius:999px;" +
   "font-size:12px;color:#9aa1ab;cursor:pointer;user-select:none;display:none;";
 soundChip.onclick = () => { video.muted = !video.muted; syncSoundChip(); };
-document.getElementById("stage").appendChild(soundChip);
+soundChip.addEventListener("pointerup", (event) => event.stopPropagation());
+soundChip.addEventListener("pointerdown", resetUiHide);
+stage.appendChild(soundChip);
 
 function syncSoundChip() {
   if (!hello || !hello.audio) { soundChip.style.display = "none"; return; }
@@ -142,7 +180,10 @@ if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) {
 const raf = { count: 0, last: 0, fps: 0 };
 (function rafLoop() { raf.count++; requestAnimationFrame(rafLoop); })();
 setInterval(() => { raf.fps = raf.count - raf.last; raf.last = raf.count; }, 1000);
-if (params.get("stats") === "1") statsEl.classList.add("show");
+if (params.get("stats") === "1") {
+  statsEl.classList.add("show");
+  badge.classList.add("stats-open");
+}
 
 function setStatus(live, text) {
   badge.classList.toggle("live", live);
