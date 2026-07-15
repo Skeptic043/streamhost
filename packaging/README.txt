@@ -13,7 +13,7 @@ SETUP (once, ~2 minutes)
    connect, click "Open port" in the app: it asks Windows for
    administrator approval once and configures the stream port for you
    (the port is what StreamHost serves the stream on and what viewers'
-   browsers connect to). You only do this once per PC.
+   browsers connect to). You normally do this once for each port you use.
    If you'd rather do it up front, or "Open port" doesn't work for
    some reason, right-click setup.bat -> Run as administrator instead.
    It does the same thing: reserves the stream port and adds a firewall
@@ -28,16 +28,18 @@ STREAMING
 ---------
 1. Double-click StreamHost.exe.
 2. Pick your game from the list, pick a quality preset, Start streaming.
-   The encoder dropdown picks NVIDIA NVENC, AMD AMF, Intel QSV, or CPU
-   (libx264); leave it on Auto unless you have a reason to force one.
+   The encoder dropdown shows Auto, CPU, and the hardware encoders detected
+   on this PC; leave it on Auto unless you have a reason to force one.
    Live status shows which encoder is actually running, including if it
    falls back to CPU mid-stream.
 3. Copy link -> paste it to your friends. They open it in any browser.
+   For a viewer who is only on your LAN, use the arrow next to Copy link
+   and choose Copy LAN link.
    Hover the video for sound and volume controls, and fullscreen.
    The link includes a per-stream key, a new one is generated every time
-   you start a stream. Viewers on your Tailscale network pick the new key
-   up automatically if their tab or grid stays open; anyone else needs a
-   fresh link (or "Find streams" in the Watch window).
+   you start a stream. Direct members of your Tailscale network pick the
+   new key up automatically if their tab or grid stays open. A viewer using
+   a shared-machine invite needs the fresh link you send.
    While the app is open but not streaming, the link shows "not streaming
    yet" and connects on its own once you start.
 
@@ -61,10 +63,13 @@ the list is remembered by your browser.
 
 TIPS
 ----
-- FULLSCREEN GAMES: share the whole monitor. Monitor shares detect
-  exclusive-fullscreen games automatically and switch capture method
-  as needed. The cursor is captured either way.
+- FULLSCREEN GAMES: share the whole monitor. Monitor shares use the
+  full-rate desktop-duplication path and capture the cursor. If an
+  exclusive-fullscreen game freezes, switch the game to borderless mode.
   Pick the game in the Audio list so the monitor share has sound.
+- WINDOW SHARES AT 60 FPS: Windows window capture can deliver fewer fresh
+  frames than the target rate on some systems. Share the whole monitor for
+  the full-rate capture path.
 - The Audio dropdown chooses whose sound the stream carries: the
   captured window, any other running app, or nothing.
 - "Watch streams" in the app opens the built-in viewer (same grid as
@@ -91,8 +96,9 @@ and encoder info on the clipboard. Paste it when reporting a problem.
 - Stream page never loads: the port isn't open yet, or Tailscale isn't
   connected on one end. Click "Open port" in the app (or run setup.bat
   as admin) and try again.
-- Status shows "THIS PC ONLY": click "Open port" (or run setup.bat) for
-  that port, then restart the stream.
+- Status shows "THIS PC ONLY": click "Open port" for that port; the app
+  restarts an active stream automatically. If you run setup.bat instead,
+  restart the stream yourself.
 - Page loads but video never starts: same as above, the port that
   viewers' browsers connect to isn't reachable yet. Click "Open port" again
   or run setup.bat.

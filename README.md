@@ -3,17 +3,18 @@
 StreamHost streams a monitor or a single window from a Windows PC to other
 people's browsers. It was built for private game streaming in a small group:
 you run one exe, people you choose open a link, and that's the whole setup.
-Transport is WebSocket, playback is MSE. No WebRTC, no signaling server, no
-account, no cloud in the middle.
+Transport is WebSocket, playback is MSE. No WebRTC or signaling server.
+StreamHost itself has no account system or cloud relay.
 
-Viewers need nothing but a browser. Firefox and Chrome both work, including
-with privacy addons, which is a big part of why this exists.
+Once network access is in place, viewers watch in a browser with no StreamHost
+viewer app or extension. Firefox and Chrome both work, including with privacy
+addons, which is a big part of why this exists.
 
 ## What it does
 
 - Streams a whole monitor or a single window, your choice. Monitor capture
-  uses desktop duplication and switches capture method automatically, so
-  fullscreen games work and the cursor is included.
+  uses desktop duplication for full-rate capture and includes the cursor.
+  Some exclusive-fullscreen games still need borderless mode.
 - Streams the audio of whichever app you pick (the captured game, another
   app, or nothing). Your voice chat is not part of the capture unless you
   deliberately select it.
@@ -46,20 +47,21 @@ with privacy addons, which is a big part of why this exists.
 1. Download the latest release zip from the Releases page, unzip it
    anywhere, run StreamHost.exe.
 2. Pick what to share and a quality preset, click Start streaming.
-3. Click Copy link and send it to whoever is watching.
+3. Click Copy link and send it to whoever is watching. For someone who is
+   only on your LAN, use the small arrow next to it and choose Copy LAN link.
 4. If someone can't connect, click "Open port" in the app. It asks for
-   administrator approval once and opens the stream port.
+   administrator approval and opens that stream port. For LAN-only viewing,
+   tick "Allow LAN viewers" first; otherwise access stays Tailscale-only.
 
-If you prefer a script, running setup.bat as administrator does the same
-thing.
+If you prefer a script, running setup.bat as administrator sets up
+Tailscale-only access for that port.
 
-That's it for people on the same network. For watching over the internet,
-see the next section.
+For watching over the internet, see the next section.
 
 Note on links: each stream start generates a new viewer key, so the link
-changes when you restart a stream. Viewers on your Tailscale network pick
-up the new key automatically if they keep their tab or grid open; anyone
-else needs the fresh link.
+changes when you restart a stream. Viewers who joined your tailnet pick up
+the new key automatically if they keep their tab or grid open. Viewers using
+a shared-machine invite should use the fresh link you send.
 
 ## Watching over the internet: Tailscale
 
@@ -139,13 +141,14 @@ The model in plain terms, so you can decide whether it fits your use:
   require it, so a bare address or an old link does not work. The status
   endpoint and the page files themselves are not key-gated; that is what
   lets grid pages check whether a host is live.
-- **Devices on your Tailscale network are trusted.** Only devices that can
-  reach the host over your tailnet or the permitted LAN can access it at
-  all, and Tailscale peers pick up the current viewer key automatically;
-  that is how Find streams and key rotation work, and it is deliberate.
-  In practice, reachability is the real gate: anyone you let onto your
-  tailnet, or share your PC with, can watch. The key mainly protects
-  against stale links and casual access from an allowed LAN.
+- **Devices with network access are trusted.** Only devices that can reach
+  the host over Tailscale or the permitted LAN can access it at all. Direct
+  tailnet members pick up the current viewer key automatically; that is how
+  Find streams and key rotation work, and it is deliberate. A viewer using
+  a shared-machine invite should use the full link you send. In practice,
+  reachability is the real gate: anyone you let onto your tailnet, or share
+  your PC with, can watch. The key mainly protects against stale links and
+  casual access from an allowed LAN.
 - **Tailscale is recognized by address range.** StreamHost treats the
   100.64.0.0/10 range as Tailscale. Tailscale uses that range, but does
   not own it exclusively; another VPN or a carrier-grade NAT setup that
@@ -168,9 +171,9 @@ The model in plain terms, so you can decide whether it fits your use:
   and the old link went stale. Send a fresh link, or have them use Find
   streams in the Watch window.
 - Status looks fine but nobody can connect: firewall state can drift (a
-  Windows reset, another program, a network profile change). Run Fix
-  access again. It configures one port at a time, so after changing the
-  port, run it again for the new one; LAN access in particular does not
+  Windows reset, another program, a network profile change). Click "Open
+  port" again. It configures one port at a time, so after changing the
+  port, click it again for the new one; LAN access in particular does not
   carry over from a previous port. And if you streamed Tailscale-only but
   now want LAN viewers, tick "Allow LAN viewers" and click "Open port" again
   on the same port.
@@ -180,6 +183,9 @@ The model in plain terms, so you can decide whether it fits your use:
 - Smooth on one browser, choppy on another: check that the browser's
   hardware acceleration is on. Add `&stats=1` to the end of the link for a
   diagnostics overlay.
+- A 60 fps window share reports lower source fps: Windows window capture can
+  deliver fewer fresh frames on some systems. Share the whole monitor for the
+  full-rate capture path.
 - Anything else: "Copy log" in the app puts the log plus version, system,
   GPU, and encoder info on the clipboard. Open an issue and paste it.
 
