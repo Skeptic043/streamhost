@@ -315,8 +315,7 @@ public sealed class MainForm : Form
 
         _presetCombo.Items.AddRange(Presets);
         _presetCombo.SelectedIndex = DefaultPresetIndex;
-        _encoderCombo.Items.AddRange(Encoders);
-        _encoderCombo.SelectedIndex = 0;
+        PopulateEncoderChoices();
 
         ApplyDarkTheme(this);
         _startButton.BackColor = AccentDark;
@@ -1126,6 +1125,50 @@ public sealed class MainForm : Form
         }
     }
 
+    private void PopulateEncoderChoices()
+    {
+        var hardwareVendors = new HashSet<uint>();
+        bool enumerationFailed = false;
+        try
+        {
+            using var factory = Vortice.DXGI.DXGI.CreateDXGIFactory1<Vortice.DXGI.IDXGIFactory1>();
+            for (uint i = 0; factory.EnumAdapters1(i, out Vortice.DXGI.IDXGIAdapter1? adapter).Success; i++)
+            {
+                using (adapter)
+                {
+                    var description = adapter!.Description1;
+                    uint vendorId = (uint)description.VendorId;
+                    if ((description.Flags & Vortice.DXGI.AdapterFlags.Software) != 0 || vendorId == 0x1414)
+                        continue;
+                    hardwareVendors.Add(vendorId);
+                }
+            }
+        }
+        catch
+        {
+            enumerationFailed = true;
+        }
+
+        // Raw BGRA frames are piped to ffmpeg, so capture and encoder adapters
+        // are independent. The picker only needs hardware from the encoder vendor.
+        EncoderChoice[] choices = enumerationFailed
+            ? Encoders
+            : Encoders.Where(e => e.Value switch
+            {
+                "h264_nvenc" => hardwareVendors.Contains(0x10DE),
+                "h264_amf" => hardwareVendors.Contains(0x1002),
+                "h264_qsv" => hardwareVendors.Contains(0x8086),
+                _ => true,
+            }).ToArray();
+
+        _encoderCombo.Items.AddRange(choices);
+        _encoderCombo.SelectedIndex = 0;
+        // A failed DXGI read must leave every manual choice available; the
+        // encoder probe and watchdog remain the runtime guard.
+        if (enumerationFailed)
+            Console.WriteLine("[encoder] DXGI adapter enumeration failed; showing all encoder choices.");
+    }
+
     /// <summary>Rewrites the Native preset entries with the selected source's real
     /// resolution, e.g. "Native · 60 fps (2560x1440)". The bitrate dropdown next
     /// to it carries the Mbps numbers.</summary>
@@ -1726,7 +1769,15 @@ public sealed class MainForm : Form
             SelectAudioByKey(s.AudioSource);
             if (s.Port is >= 1024 and <= 65535) _portInput.Value = s.Port;
             if (!string.IsNullOrWhiteSpace(s.StreamName)) _nameInput.Text = s.StreamName;
-            int encIdx = Array.FindIndex(Encoders, e => e.Value == s.Encoder);
+            int encIdx = -1;
+            for (int i = 0; i < _encoderCombo.Items.Count; i++)
+            {
+                if (_encoderCombo.Items[i] is EncoderChoice e && e.Value == s.Encoder)
+                {
+                    encIdx = i;
+                    break;
+                }
+            }
             _encoderCombo.SelectedIndex = encIdx >= 0 ? encIdx : 0;
             _allowLanApplied = s.AllowLan;
             _allowLanPort = s.AllowLanPort;

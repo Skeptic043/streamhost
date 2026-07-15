@@ -30,6 +30,9 @@ public static class WindowEnumerator
             {
                 if (!IsWindowVisible(hWnd)) return true;
                 if (IsCloaked(hWnd)) return true;
+                // Monitor sharing owns full-desktop capture; Explorer's desktop
+                // hosts are shell infrastructure, not application windows.
+                if (IsDesktopShellWindow(hWnd)) return true;
 
                 int len = GetWindowTextLengthW(hWnd);
                 if (len == 0) return true;
@@ -152,6 +155,13 @@ public static class WindowEnumerator
         return DwmGetWindowAttribute(hWnd, 14, out int cloaked, sizeof(int)) == 0 && cloaked != 0;
     }
 
+    private static bool IsDesktopShellWindow(IntPtr hWnd)
+    {
+        var className = new StringBuilder(256);
+        if (GetClassNameW(hWnd, className, className.Capacity) == 0) return false;
+        return className.ToString() is "Progman" or "WorkerW";
+    }
+
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
     [StructLayout(LayoutKind.Sequential)]
@@ -198,6 +208,9 @@ public static class WindowEnumerator
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetWindowTextW(IntPtr hWnd, StringBuilder text, int maxCount);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassNameW(IntPtr hWnd, StringBuilder className, int maxCount);
 
     [DllImport("user32.dll")]
     private static extern int GetWindowTextLengthW(IntPtr hWnd);
