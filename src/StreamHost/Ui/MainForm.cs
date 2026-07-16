@@ -96,6 +96,8 @@ public sealed class MainForm : Form
         // A missing value deserializes to 0, which matches no real port, so LAN
         // stays off until the next successful Open port on that port.
         public int AllowLanPort { get; set; }
+        // Canonical four-component version dismissed from the quiet update row.
+        public string SkipUpdateVersion { get; set; } = "";
     }
 
     private static readonly string SettingsPath = Path.Combine(
@@ -126,6 +128,14 @@ public sealed class MainForm : Form
     private readonly Button _switchButton = new() { Text = "Switch source", Width = 112, Height = 38 };
     private readonly TextBox _linkBox = new() { ReadOnly = true, Width = 260, TextAlign = HorizontalAlignment.Center, BorderStyle = BorderStyle.FixedSingle };
     private readonly Label _statusLabel = new() { Text = "Not streaming.", AutoSize = true };
+    private readonly TableLayoutPanel _updatePanel = new()
+    {
+        Dock = DockStyle.Top, Height = 36, Visible = false, BackColor = Card,
+        ColumnCount = 3, Padding = new Padding(12, 4, 8, 4),
+    };
+    private readonly Label _updateLabel = new() { AutoSize = true, ForeColor = Fg, Anchor = AnchorStyles.Left };
+    private readonly Button _viewReleaseButton = new() { Text = "View release", Width = 88, Height = 26, Anchor = AnchorStyles.Right };
+    private readonly Button _dismissUpdateButton = new() { Text = "Dismiss", Width = 70, Height = 26, Anchor = AnchorStyles.Right };
     private readonly TextBox _logBox = new()
     {
         Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical,
@@ -201,6 +211,9 @@ public sealed class MainForm : Form
     // of them.
     private Action<string>? _logHandler;
     private bool _fixingPort; // guards the elevated Open port helper against re-entry
+    private readonly CancellationTokenSource _updateCheckCts = new();
+    private string? _availableUpdateVersion;
+    private string? _skippedUpdateVersion;
 
     public MainForm()
     {
@@ -304,11 +317,19 @@ public sealed class MainForm : Form
         _bundleButton.Anchor = AnchorStyles.Right;
         _statusLabel.ForeColor = Dim;
 
+        _updatePanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        _updatePanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        _updatePanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        _updatePanel.Controls.Add(_updateLabel, 0, 0);
+        _updatePanel.Controls.Add(_viewReleaseButton, 1, 0);
+        _updatePanel.Controls.Add(_dismissUpdateButton, 2, 0);
+
         var logPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(8, 4, 8, 8), BackColor = Bg };
         logPanel.Controls.Add(_logBox);
 
         Controls.Add(logPanel);
         Controls.Add(statusPanel);
+        Controls.Add(_updatePanel);
         Controls.Add(actionPanel);
         Controls.Add(optionsRow);
         Controls.Add(sourceGroup);
@@ -362,6 +383,8 @@ public sealed class MainForm : Form
         _watchButton.Click += (_, _) => OpenWatchWindow();
         _bundleButton.Click += (_, _) => CopySupportBundle();
         _openLogsButton.Click += (_, _) => OpenLogsFolder();
+        _viewReleaseButton.Click += (_, _) => ViewLatestRelease();
+        _dismissUpdateButton.Click += (_, _) => DismissUpdate();
         _fixPortButton.Click += (_, _) => FixPortAccess();
         _portInput.ValueChanged += (_, _) => { UpdateLinkBox(); RestartIdleServer(); };
         _nameInput.Leave += (_, _) => RestartIdleServer(); // idle stats carry the name
@@ -381,6 +404,8 @@ public sealed class MainForm : Form
         // second launch, so there is no Application.Exit wiring here.
         FormClosing += (_, _) =>
         {
+            _updateCheckCts.Cancel();
+            _updateCheckCts.Dispose();
             // Drop the static-event subscription first so this recreated-then-
             // closed form doesn't stay rooted receiving log lines forever.
             if (_logHandler is not null) ConsoleMirror.LineWritten -= _logHandler;
@@ -416,6 +441,7 @@ public sealed class MainForm : Form
 
         PopulateSources();
         LoadSettings();
+        _ = CheckForUpdatesAsync();
         UpdateLinkBox();
         RefreshSourceOptions();
         StartIdleServer();
@@ -1656,6 +1682,54 @@ public sealed class MainForm : Form
         }
     }
 
+    private async Task CheckForUpdatesAsync()
+    {
+        try
+        {
+            CancellationToken token = _updateCheckCts.Token;
+            string? remoteTag = await UpdateChecker.GetLatestReleaseTagAsync(token);
+            if (token.IsCancellationRequested || IsDisposed || Disposing
+                || !UpdateChecker.IsRemoteVersionNewer(AppVersion(), remoteTag))
+                return;
+
+            string? canonical = UpdateChecker.CanonicalVersion(remoteTag);
+            Version? remoteVersion = UpdateChecker.ParseVersion(remoteTag);
+            if (canonical is null || remoteVersion is null
+                || string.Equals(canonical, _skippedUpdateVersion, StringComparison.Ordinal))
+                return;
+
+            _availableUpdateVersion = canonical;
+            int displayParts = remoteVersion.Revision != 0 ? 4 : remoteVersion.Build != 0 ? 3 : 2;
+            _updateLabel.Text = $"StreamHost v{remoteVersion.ToString(displayParts)} is available.";
+            _updatePanel.Visible = true;
+        }
+        catch
+        {
+            // Update discovery must never interrupt the app or surface a failure.
+        }
+    }
+
+    private static void ViewLatestRelease()
+    {
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = UpdateChecker.LatestReleasePageUrl,
+                UseShellExecute = true,
+            });
+        }
+        catch { }
+    }
+
+    private void DismissUpdate()
+    {
+        if (_availableUpdateVersion is null) return;
+        _skippedUpdateVersion = _availableUpdateVersion;
+        _updatePanel.Visible = false;
+        SaveSettings();
+    }
+
     internal static string AppVersion() =>
         System.Reflection.Assembly.GetExecutingAssembly()
             .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
@@ -1823,6 +1897,7 @@ public sealed class MainForm : Form
             _allowLanApplied = s.AllowLan;
             _allowLanPort = s.AllowLanPort;
             _allowLanCheck.Checked = s.AllowLan;
+            _skippedUpdateVersion = UpdateChecker.CanonicalVersion(s.SkipUpdateVersion);
             UpdateAudioModeLabel();
         }
         catch { /* corrupted settings are not worth crashing over */ }
@@ -1847,6 +1922,7 @@ public sealed class MainForm : Form
                 Encoder = ((EncoderChoice)_encoderCombo.SelectedItem!).Value,
                 AllowLan = _allowLanApplied,
                 AllowLanPort = _allowLanPort,
+                SkipUpdateVersion = _skippedUpdateVersion ?? "",
             };
             Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!);
             // Write to a sibling temp file, then atomically swap it in, so a crash
