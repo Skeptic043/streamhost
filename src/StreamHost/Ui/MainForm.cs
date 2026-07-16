@@ -141,7 +141,34 @@ public sealed class MainForm : Form
         Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical,
         Dock = DockStyle.Fill, Font = new Font("Consolas", 8.5f), BorderStyle = BorderStyle.None,
     };
+    private readonly TableLayoutPanel _lowerPanel = new()
+    {
+        Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1,
+        Padding = new Padding(8, 4, 8, 8), BackColor = Bg,
+    };
+    private readonly Panel _previewPanel = new()
+    {
+        Dock = DockStyle.Fill, Margin = new Padding(0, 0, 4, 0),
+        BackColor = Color.FromArgb(16, 18, 21), BorderStyle = BorderStyle.FixedSingle,
+    };
+    private readonly PictureBox _previewBox = new()
+    {
+        Dock = DockStyle.Fill, SizeMode = PictureBoxSizeMode.Zoom,
+        BackColor = Color.FromArgb(16, 18, 21), AccessibleName = "Selected source preview",
+    };
+    private readonly Label _previewPlaceholder = new()
+    {
+        Dock = DockStyle.Fill, Text = "Waiting for preview...", TextAlign = ContentAlignment.MiddleCenter,
+        ForeColor = Dim, BackColor = Color.FromArgb(16, 18, 21), Padding = new Padding(12),
+    };
+    private readonly Panel _logPanel = new()
+    {
+        Dock = DockStyle.Fill, Margin = new Padding(4, 0, 0, 0),
+        BackColor = Color.FromArgb(16, 18, 21),
+    };
     private readonly System.Windows.Forms.Timer _statsTimer = new() { Interval = 1000 };
+    private readonly System.Windows.Forms.Timer _previewDebounceTimer = new() { Interval = 300 };
+    private readonly System.Windows.Forms.Timer _previewPollTimer = new() { Interval = 500 };
 
     private List<WindowDescription> _windows = [];
     private List<MonitorDescription> _monitors = [];
@@ -189,6 +216,9 @@ public sealed class MainForm : Form
     private static extern bool IsWindow(IntPtr hwnd);
 
     [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr hwnd);
+
+    [DllImport("user32.dll")]
     private static extern IntPtr SendMessage(IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam);
 
     private const int WmSetRedraw = 0x000B;
@@ -204,6 +234,10 @@ public sealed class MainForm : Form
     // keep retrying the holding page instead of giving up for the whole run.
     private readonly System.Windows.Forms.Timer _idleRetryTimer = new() { Interval = 15000 };
     private bool _idleBindFailed;
+    private IdlePreviewCapture? _idlePreviewCapture;
+    private IntPtr _previewWaitingWindow;
+    private bool _previewPausedForForm = true;
+    private bool _closing;
 
     // Held so it can be unsubscribed on close: ConsoleMirror.LineWritten is a
     // STATIC event, and AppRunContext recreates this form, so an anonymous
@@ -324,10 +358,17 @@ public sealed class MainForm : Form
         _updatePanel.Controls.Add(_viewReleaseButton, 1, 0);
         _updatePanel.Controls.Add(_dismissUpdateButton, 2, 0);
 
-        var logPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(8, 4, 8, 8), BackColor = Bg };
-        logPanel.Controls.Add(_logBox);
+        _previewPanel.Controls.Add(_previewBox);
+        _previewPanel.Controls.Add(_previewPlaceholder);
+        _previewPlaceholder.BringToFront();
+        _logPanel.Controls.Add(_logBox);
+        _lowerPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 35));
+        _lowerPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 65));
+        _lowerPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        _lowerPanel.Controls.Add(_previewPanel, 0, 0);
+        _lowerPanel.Controls.Add(_logPanel, 1, 0);
 
-        Controls.Add(logPanel);
+        Controls.Add(_lowerPanel);
         Controls.Add(statusPanel);
         Controls.Add(_updatePanel);
         Controls.Add(actionPanel);
@@ -348,9 +389,9 @@ public sealed class MainForm : Form
         // Nothing gets disabled — the selected radio decides which combo is USED.
         _windowCombo.DropDown += (_, _) => PopulateWindows();   // fresh list every open
         _monitorCombo.DropDown += (_, _) => PopulateMonitors(); // monitors change too (dock/undock)
-        _rbWindow.CheckedChanged += (_, _) => { UpdateAudioModeLabel(); RefreshSourceOptions(); };
-        _windowCombo.SelectedIndexChanged += (_, _) => RefreshSourceOptions();
-        _monitorCombo.SelectedIndexChanged += (_, _) => RefreshSourceOptions();
+        _rbWindow.CheckedChanged += (_, _) => { UpdateAudioModeLabel(); RefreshSourceOptions(); ScheduleIdlePreviewRefresh(); };
+        _windowCombo.SelectedIndexChanged += (_, _) => { RefreshSourceOptions(); ScheduleIdlePreviewRefresh(); };
+        _monitorCombo.SelectedIndexChanged += (_, _) => { RefreshSourceOptions(); ScheduleIdlePreviewRefresh(); };
         _presetCombo.SelectedIndexChanged += (_, _) => RefreshSourceOptions();
         // The bitrate combo is the single source of truth for the chosen tier:
         // remember every user pick so it survives repopulates (source/preset
@@ -390,6 +431,10 @@ public sealed class MainForm : Form
         _nameInput.Leave += (_, _) => RestartIdleServer(); // idle stats carry the name
         _statsTimer.Tick += (_, _) => UpdateStatus();
         _idleRetryTimer.Tick += (_, _) => StartIdleServer();
+        _previewDebounceTimer.Tick += (_, _) => StartIdlePreview();
+        _previewPollTimer.Tick += (_, _) => PollIdlePreview();
+        VisibleChanged += (_, _) => SyncIdlePreviewVisibility();
+        Resize += (_, _) => SyncIdlePreviewVisibility();
 
         _logHandler = line =>
         {
@@ -404,6 +449,7 @@ public sealed class MainForm : Form
         // second launch, so there is no Application.Exit wiring here.
         FormClosing += (_, _) =>
         {
+            _closing = true;
             _updateCheckCts.Cancel();
             _updateCheckCts.Dispose();
             // Drop the static-event subscription first so this recreated-then-
@@ -411,6 +457,7 @@ public sealed class MainForm : Form
             if (_logHandler is not null) ConsoleMirror.LineWritten -= _logHandler;
             SaveSettings();
             _statsTimer.Stop();
+            StopIdlePreview(hideLayout: true);
             // Detach the session before stopping it: Stop() joins the session
             // thread, whose Stopped callback posts back here via BeginInvoke. With
             // _session nulled, that callback's ReferenceEquals(_session, session)
@@ -436,6 +483,8 @@ public sealed class MainForm : Form
             // nothing else disposes them.
             _statsTimer.Dispose();
             _idleRetryTimer.Dispose();
+            _previewDebounceTimer.Dispose();
+            _previewPollTimer.Dispose();
             _toolTip.Dispose();
         };
 
@@ -444,6 +493,7 @@ public sealed class MainForm : Form
         _ = CheckForUpdatesAsync();
         UpdateLinkBox();
         RefreshSourceOptions();
+        SetPreviewLayoutVisible(true);
         StartIdleServer();
     }
 
@@ -511,6 +561,204 @@ public sealed class MainForm : Form
         TopMost = true;
         TopMost = wasTop;
         Activate();
+    }
+
+    private bool IsTrueIdle =>
+        _session is null && !_stopping && !_pendingCpuRetry && _pendingSwitch is null;
+
+    private bool CanRunIdlePreview =>
+        !_closing && IsTrueIdle && Visible && WindowState != FormWindowState.Minimized;
+
+    /// <summary>Debounce source-picker churn and release the old source at once,
+    /// so the preview never shows a stale pick while the new one settles.</summary>
+    private void ScheduleIdlePreviewRefresh()
+    {
+        if (_closing) return;
+        if (!CanRunIdlePreview)
+        {
+            if (!IsTrueIdle) StopIdlePreview(hideLayout: true);
+            return;
+        }
+
+        SetPreviewLayoutVisible(true);
+        StopIdlePreview(placeholder: "Loading preview...");
+        _previewDebounceTimer.Start();
+    }
+
+    private void StartIdlePreview()
+    {
+        _previewDebounceTimer.Stop();
+        if (!CanRunIdlePreview) return;
+
+        StopIdlePreview(placeholder: "Waiting for preview...");
+        SetPreviewLayoutVisible(true);
+
+        try
+        {
+            if (_rbWindow.Checked)
+            {
+                int index = _windowCombo.SelectedIndex;
+                if (index < 0 || index >= _windows.Count)
+                {
+                    SetPreviewPlaceholder("Select a source to preview.");
+                    return;
+                }
+
+                IntPtr handle = _windows[index].Handle;
+                if (!IsWindow(handle))
+                {
+                    SetPreviewPlaceholder("Source is closed or unavailable.");
+                    return;
+                }
+
+                if (IsIconic(handle))
+                {
+                    _previewWaitingWindow = handle;
+                    SetPreviewPlaceholder("Window is minimized.");
+                    _previewPollTimer.Start();
+                    return;
+                }
+
+                _idlePreviewCapture = IdlePreviewCapture.ForWindow(handle);
+            }
+            else
+            {
+                int index = _monitorCombo.SelectedIndex;
+                if (index < 0 || index >= _monitors.Count)
+                {
+                    SetPreviewPlaceholder("Select a source to preview.");
+                    return;
+                }
+
+                _idlePreviewCapture = IdlePreviewCapture.ForMonitor(_monitors[index].Handle);
+            }
+
+            _previewPollTimer.Start();
+            PollIdlePreview();
+        }
+        catch
+        {
+            StopIdlePreview(placeholder: "Preview unavailable.");
+        }
+    }
+
+    private void PollIdlePreview()
+    {
+        if (!CanRunIdlePreview)
+        {
+            SyncIdlePreviewVisibility();
+            return;
+        }
+
+        if (_idlePreviewCapture is null)
+        {
+            if (_previewWaitingWindow == IntPtr.Zero) return;
+            if (!IsWindow(_previewWaitingWindow))
+            {
+                _previewWaitingWindow = IntPtr.Zero;
+                _previewPollTimer.Stop();
+                SetPreviewPlaceholder("Source is closed or unavailable.");
+            }
+            else if (!IsIconic(_previewWaitingWindow))
+            {
+                _previewWaitingWindow = IntPtr.Zero;
+                StartIdlePreview();
+            }
+            return;
+        }
+
+        IdlePreviewCapture capture = _idlePreviewCapture;
+        IdlePreviewPollResult result;
+        try { result = capture.Poll(); }
+        catch
+        {
+            result = new IdlePreviewPollResult(IdlePreviewPollState.Unavailable);
+        }
+
+        switch (result.State)
+        {
+            case IdlePreviewPollState.Frame when result.Image is not null:
+                SetPreviewImage(result.Image);
+                break;
+            case IdlePreviewPollState.Minimized:
+                SetPreviewPlaceholder("Window is minimized.");
+                break;
+            case IdlePreviewPollState.Unavailable:
+                _idlePreviewCapture = null;
+                _previewPollTimer.Stop();
+                try { capture.Dispose(); } catch { }
+                SetPreviewPlaceholder("Source is closed or unavailable.");
+                break;
+        }
+    }
+
+    /// <summary>Pause means release, not merely stop painting. Restore creates a
+    /// fresh WGC session after the same source debounce used by picker changes.</summary>
+    private void SyncIdlePreviewVisibility()
+    {
+        if (_closing) return;
+        bool paused = !Visible || WindowState == FormWindowState.Minimized;
+        if (paused)
+        {
+            _previewPausedForForm = true;
+            StopIdlePreview(placeholder: "Preview paused while the window is hidden.");
+            return;
+        }
+
+        if (!_previewPausedForForm) return;
+        _previewPausedForForm = false;
+        ResumeIdlePreview();
+    }
+
+    private void ResumeIdlePreview()
+    {
+        if (_closing || !IsTrueIdle) return;
+        SetPreviewLayoutVisible(true);
+        if (Visible && WindowState != FormWindowState.Minimized)
+            ScheduleIdlePreviewRefresh();
+    }
+
+    private void StopIdlePreview(bool hideLayout = false, string placeholder = "Preview available while idle.")
+    {
+        _previewDebounceTimer.Stop();
+        _previewPollTimer.Stop();
+        _previewWaitingWindow = IntPtr.Zero;
+
+        IdlePreviewCapture? capture = _idlePreviewCapture;
+        _idlePreviewCapture = null;
+        try { capture?.Dispose(); } catch { }
+        SetPreviewPlaceholder(placeholder);
+        if (hideLayout) SetPreviewLayoutVisible(false);
+    }
+
+    private void SetPreviewImage(Bitmap image)
+    {
+        Image? old = _previewBox.Image;
+        _previewBox.Image = image;
+        _previewPlaceholder.Visible = false;
+        old?.Dispose();
+    }
+
+    private void SetPreviewPlaceholder(string text)
+    {
+        Image? old = _previewBox.Image;
+        _previewBox.Image = null;
+        old?.Dispose();
+        _previewPlaceholder.Text = text;
+        _previewPlaceholder.Visible = true;
+        _previewPlaceholder.BringToFront();
+    }
+
+    private void SetPreviewLayoutVisible(bool visible)
+    {
+        _lowerPanel.SuspendLayout();
+        _previewPanel.Visible = visible;
+        _lowerPanel.ColumnStyles[0].SizeType = visible ? SizeType.Percent : SizeType.Absolute;
+        _lowerPanel.ColumnStyles[0].Width = visible ? 35 : 0;
+        _lowerPanel.ColumnStyles[1].SizeType = SizeType.Percent;
+        _lowerPanel.ColumnStyles[1].Width = visible ? 65 : 100;
+        _logPanel.Margin = visible ? new Padding(4, 0, 0, 0) : Padding.Empty;
+        _lowerPanel.ResumeLayout();
     }
 
     private void PopulateSources()
@@ -600,7 +848,11 @@ public sealed class MainForm : Form
         // Reuse the pending key so links copied while idle (they carry ?k=this)
         // stay valid the moment the stream goes live. Rotated after a live stop.
         var config = BuildConfigFromUi((int)_portInput.Value, _pendingKey);
-        if (config is null) return;
+        if (config is null)
+        {
+            ResumeIdlePreview();
+            return;
+        }
 
         if (config.Port != 8093)
             AppendLog("Note: setup.bat / Open port configure one port at a time; other ports need their own run.");
@@ -676,6 +928,10 @@ public sealed class MainForm : Form
     /// CPU-encoder retry when the live video pipeline stalls. Returns false if it couldn't start.</summary>
     private bool LaunchSession(SessionConfig config)
     {
+        // A preview and a real session must never own the same source together.
+        // This is synchronous: WGC is fully disposed before StreamSession can
+        // create its capture on the session thread.
+        StopIdlePreview(hideLayout: true);
         StopIdleServer(); // hand the port to the session
         StreamSession session;
         try
@@ -687,6 +943,7 @@ public sealed class MainForm : Form
             AppendLog($"Failed to start: {ex.Message}");
             _session = null;
             StartIdleServer();
+            ResumeIdlePreview();
             return false;
         }
 
@@ -949,6 +1206,11 @@ public sealed class MainForm : Form
 
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
 
+        // The dialog has only held descriptions so far. Release any idle WGC
+        // source before its accepted pick is applied to the main controls and
+        // can flow into Start/Switch acquisition.
+        StopIdlePreview(hideLayout: true);
+
         // OK only. Refresh the main lists once (the single time this method mutates
         // them) so the picks resolve against a current enumeration, then VALIDATE
         // every specific pick BEFORE writing any main control: a source the dialog
@@ -974,6 +1236,7 @@ public sealed class MainForm : Form
         if (rbWin.Checked && winTarget < 0)
         {
             AppendLog($"Switch cancelled: '{winProc ?? "the picked window"}' is no longer available. Pick again.");
+            ResumeIdlePreview();
             return;
         }
         int monTarget = -1;
@@ -985,6 +1248,7 @@ public sealed class MainForm : Form
         if (rbMon.Checked && monTarget < 0)
         {
             AppendLog("Switch cancelled: the picked monitor is no longer available. Pick again.");
+            ResumeIdlePreview();
             return;
         }
         string pickedAudioKey = audioCombo.SelectedIndex switch
@@ -998,6 +1262,7 @@ public sealed class MainForm : Form
             _windows.FindIndex(w => w.ProcessName.Equals(pickedAudioKey, StringComparison.OrdinalIgnoreCase)) < 0)
         {
             AppendLog($"Switch cancelled: audio source '{pickedAudioKey}' is no longer available. Pick again.");
+            ResumeIdlePreview();
             return;
         }
 
@@ -1060,6 +1325,7 @@ public sealed class MainForm : Form
         _statusLabel.Text = reason is null or "stopped" ? "Not streaming." : $"Stopped: {reason}";
         _statusLabel.ForeColor = reason is null or "stopped" ? Dim : Red;
         StartIdleServer(); // take the port back so open tabs see "not streaming yet"
+        ResumeIdlePreview();
     }
 
     /// <summary>Serve the holding page whenever the app is open but no stream is

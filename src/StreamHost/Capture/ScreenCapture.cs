@@ -50,6 +50,7 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics
     private readonly ID3D11Device _device;
     private readonly ID3D11DeviceContext _context;
     private readonly IDirect3DDevice _winrtDevice;
+    private readonly bool _writeDiagnostics;
     private readonly GraphicsCaptureItem _item;
     private readonly Direct3D11CaptureFramePool _framePool;
     private readonly GraphicsCaptureSession _session;
@@ -134,8 +135,15 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics
     public static ScreenCapture ForWindow(IntPtr hWnd) =>
         new(D3DInterop.CreateItemForWindow(hWnd));
 
-    private ScreenCapture(GraphicsCaptureItem item)
+    internal static ScreenCapture ForPreviewMonitor(IntPtr hMonitor) =>
+        new(D3DInterop.CreateItemForMonitor(hMonitor), writeDiagnostics: false);
+
+    internal static ScreenCapture ForPreviewWindow(IntPtr hWnd) =>
+        new(D3DInterop.CreateItemForWindow(hWnd), writeDiagnostics: false);
+
+    private ScreenCapture(GraphicsCaptureItem item, bool writeDiagnostics = true)
     {
+        _writeDiagnostics = writeDiagnostics;
         D3D11.D3D11CreateDevice(
             null, DriverType.Hardware, DeviceCreationFlags.BgraSupport,
             null!, out ID3D11Device? device, out _, out ID3D11DeviceContext? context).CheckError();
@@ -167,7 +175,8 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics
             }
             catch { /* diagnostics only — never fail capture over adapter identity */ }
         }
-        Console.WriteLine($"[capture] adapter: {AdapterName}, Windows {Environment.OSVersion.Version}, LUID {AdapterLuid}, driver {DriverVersion}");
+        if (_writeDiagnostics)
+            Console.WriteLine($"[capture] adapter: {AdapterName}, Windows {Environment.OSVersion.Version}, LUID {AdapterLuid}, driver {DriverVersion}");
 
         _winrtDevice = D3DInterop.CreateWinRtDevice(_device);
         _item = item;
@@ -246,8 +255,9 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics
 
                     if (cw != _contentWidth || ch != _contentHeight)
                     {
-                        Console.WriteLine(
-                            $"[capture] source size changed: {_reportedContentWidth}x{_reportedContentHeight} -> {contentSize.Width}x{contentSize.Height}; output scaled to fit {Width}x{Height}; Switch source re-picks native size");
+                        if (_writeDiagnostics)
+                            Console.WriteLine(
+                                $"[capture] source size changed: {_reportedContentWidth}x{_reportedContentHeight} -> {contentSize.Width}x{contentSize.Height}; output scaled to fit {Width}x{Height}; Switch source re-picks native size");
                         _contentWidth = cw;
                         _contentHeight = ch;
                         _reportedContentWidth = contentSize.Width;
@@ -301,7 +311,8 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics
             if (!_disposing && _captureError is null)
             {
                 _captureError = ex;
-                Console.Error.WriteLine($"[capture] frame callback failed (HRESULT 0x{ex.HResult:X8}): {ex}");
+                if (_writeDiagnostics)
+                    Console.Error.WriteLine($"[capture] frame callback failed (HRESULT 0x{ex.HResult:X8}): {ex}");
             }
         }
         finally
@@ -560,7 +571,8 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics
             if (_captureError is null)
             {
                 _captureError = ex;
-                Console.Error.WriteLine($"[capture] frame readback failed (HRESULT 0x{ex.HResult:X8}): {ex.Message}");
+                if (_writeDiagnostics)
+                    Console.Error.WriteLine($"[capture] frame readback failed (HRESULT 0x{ex.HResult:X8}): {ex.Message}");
             }
             return false;
         }
