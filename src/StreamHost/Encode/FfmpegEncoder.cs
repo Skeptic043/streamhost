@@ -381,6 +381,17 @@ public sealed class FfmpegEncoder : IDisposable
         }
     }
 
+    /// <summary>Breaks a blocked stdin write after the output watchdog has proved
+    /// the live pipeline is stalled. The normal Dispose path still owns cleanup.</summary>
+    internal void AbortForStall()
+    {
+        try
+        {
+            if (!_process.HasExited) _process.Kill(entireProcessTree: true);
+        }
+        catch { }
+    }
+
     public void Dispose()
     {
         try { _stdin.Close(); } catch { }

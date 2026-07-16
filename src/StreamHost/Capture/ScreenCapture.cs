@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Vortice.Direct3D;
 using Vortice.Direct3D11;
@@ -14,7 +15,7 @@ namespace StreamHost.Capture;
 /// texture; TryReadFrame does a staging readback of that frame on demand, so the
 /// caller controls the output frame rate independent of the capture rate.
 /// </summary>
-public sealed class ScreenCapture : ICaptureSource
+public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics
 {
     private const DirectXPixelFormat CaptureFormat = DirectXPixelFormat.B8G8R8A8UIntNormalized;
     private const int CaptureBufferCount = 2;
@@ -69,7 +70,16 @@ public sealed class ScreenCapture : ICaptureSource
     private readonly AutoResetEvent _frameSignal = new(false);
     private volatile bool _hasFrame;
     private volatile bool _disposing;
+    private long _callbacksStarted;
     private long _framesArrived;
+    private long _readbacksStarted;
+    private long _readbacksCompleted;
+    private long _lastCallbackTicks;
+    private long _lastFrameReadyTicks;
+    private long _lastReadbackStartedTicks;
+    private long _lastReadbackCompletedTicks;
+    private int _callbackStage;
+    private int _readbackStage;
     private int _contentWidth;
     private int _contentHeight;
     private int _reportedContentWidth;
@@ -92,6 +102,18 @@ public sealed class ScreenCapture : ICaptureSource
 
     /// <summary>Monotonic count of frames delivered by the compositor — compare across calls to detect fresh content.</summary>
     public long FrameVersion => Interlocked.Read(ref _framesArrived);
+
+    CaptureProgressSnapshot ICaptureDiagnostics.GetProgressSnapshot() => new(
+        Interlocked.Read(ref _callbacksStarted),
+        Interlocked.Read(ref _framesArrived),
+        Interlocked.Read(ref _readbacksStarted),
+        Interlocked.Read(ref _readbacksCompleted),
+        Interlocked.Read(ref _lastCallbackTicks),
+        Interlocked.Read(ref _lastFrameReadyTicks),
+        Interlocked.Read(ref _lastReadbackStartedTicks),
+        Interlocked.Read(ref _lastReadbackCompletedTicks),
+        CallbackStageName(Volatile.Read(ref _callbackStage)),
+        ReadbackStageName(Volatile.Read(ref _readbackStage)));
 
     /// <summary>Waits up to <paramref name="timeoutMs"/> for a frame newer than <paramref name="sinceVersion"/>. Single-waiter only.</summary>
     public bool WaitForFreshFrame(long sinceVersion, int timeoutMs)
@@ -201,17 +223,22 @@ public sealed class ScreenCapture : ICaptureSource
         // or vanish silently). Record the first failure so the session can stop
         // with a real diagnostic instead of streaming nothing while looking live.
         Direct3D11CaptureFrame? frame = null;
+        Interlocked.Increment(ref _callbacksStarted);
+        Interlocked.Exchange(ref _lastCallbackTicks, Stopwatch.GetTimestamp());
+        Volatile.Write(ref _callbackStage, (int)CallbackStage.WaitingForGpuGate);
         try
         {
             lock (_gate)
             {
                 if (_disposing) return;
 
+                Volatile.Write(ref _callbackStage, (int)CallbackStage.GettingFrame);
                 frame = sender.TryGetNextFrame();
                 if (frame is null) return;
 
                 try
                 {
+                    Volatile.Write(ref _callbackStage, (int)CallbackStage.GpuCopyOrScale);
                     // Treat odd-to-even 1 px rounding as the same size so it cannot churn the pool.
                     var contentSize = frame.ContentSize;
                     int cw = contentSize.Width & ~1;
@@ -266,6 +293,7 @@ public sealed class ScreenCapture : ICaptureSource
             }
             _hasFrame = true;
             Interlocked.Increment(ref _framesArrived);
+            Interlocked.Exchange(ref _lastFrameReadyTicks, Stopwatch.GetTimestamp());
             try { _frameSignal.Set(); } catch (ObjectDisposedException) { }
         }
         catch (Exception ex)
@@ -279,6 +307,7 @@ public sealed class ScreenCapture : ICaptureSource
         finally
         {
             frame?.Dispose();
+            Volatile.Write(ref _callbackStage, (int)CallbackStage.Idle);
         }
     }
 
@@ -473,17 +502,22 @@ public sealed class ScreenCapture : ICaptureSource
         if (buffer.Length < rowBytes * Height)
             throw new ArgumentException("Frame buffer too small", nameof(buffer));
 
+        Interlocked.Increment(ref _readbacksStarted);
+        Interlocked.Exchange(ref _lastReadbackStartedTicks, Stopwatch.GetTimestamp());
+        Volatile.Write(ref _readbackStage, (int)ReadbackStage.WaitingForGpuGate);
         try
         {
             ID3D11Texture2D readFrom;
             MappedSubresource mapped;
             lock (_gate)
             {
+                Volatile.Write(ref _readbackStage, (int)ReadbackStage.QueueingGpuCopy);
                 var writeTo = _flip ? _stagingA : _stagingB;
                 readFrom = _flip ? _stagingB : _stagingA;
                 _flip = !_flip;
                 _context.CopyResource(writeTo, _latest);
                 if (!_primed) { _primed = true; readFrom = writeTo; } // first call: no previous copy yet
+                Volatile.Write(ref _readbackStage, (int)ReadbackStage.MappingGpuReadback);
                 mapped = _context.Map(readFrom, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
             }
 
@@ -491,6 +525,7 @@ public sealed class ScreenCapture : ICaptureSource
             // not a context call, and FrameArrived never touches the mapped resource.
             try
             {
+                Volatile.Write(ref _readbackStage, (int)ReadbackStage.CopyingToCpuBuffer);
                 fixed (byte* dst = buffer)
                 {
                     byte* src = (byte*)mapped.DataPointer;
@@ -507,11 +542,14 @@ public sealed class ScreenCapture : ICaptureSource
             }
             finally
             {
+                Volatile.Write(ref _readbackStage, (int)ReadbackStage.UnmappingGpuReadback);
                 lock (_gate)
                 {
                     _context.Unmap(readFrom, 0);
                 }
             }
+            Interlocked.Increment(ref _readbacksCompleted);
+            Interlocked.Exchange(ref _lastReadbackCompletedTicks, Stopwatch.GetTimestamp());
             return true;
         }
         catch (Exception ex)
@@ -526,7 +564,47 @@ public sealed class ScreenCapture : ICaptureSource
             }
             return false;
         }
+        finally
+        {
+            Volatile.Write(ref _readbackStage, (int)ReadbackStage.Idle);
+        }
     }
+
+    private enum CallbackStage
+    {
+        Idle,
+        WaitingForGpuGate,
+        GettingFrame,
+        GpuCopyOrScale,
+    }
+
+    private enum ReadbackStage
+    {
+        Idle,
+        WaitingForGpuGate,
+        QueueingGpuCopy,
+        MappingGpuReadback,
+        CopyingToCpuBuffer,
+        UnmappingGpuReadback,
+    }
+
+    private static string CallbackStageName(int stage) => (CallbackStage)stage switch
+    {
+        CallbackStage.WaitingForGpuGate => "waiting-for-gpu-gate",
+        CallbackStage.GettingFrame => "getting-wgc-frame",
+        CallbackStage.GpuCopyOrScale => "gpu-copy-or-scale",
+        _ => "idle",
+    };
+
+    private static string ReadbackStageName(int stage) => (ReadbackStage)stage switch
+    {
+        ReadbackStage.WaitingForGpuGate => "waiting-for-gpu-gate",
+        ReadbackStage.QueueingGpuCopy => "queueing-gpu-copy",
+        ReadbackStage.MappingGpuReadback => "mapping-gpu-readback",
+        ReadbackStage.CopyingToCpuBuffer => "copying-to-cpu-buffer",
+        ReadbackStage.UnmappingGpuReadback => "unmapping-gpu-readback",
+        _ => "idle",
+    };
 
     public void Dispose()
     {

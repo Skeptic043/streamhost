@@ -44,6 +44,10 @@ public sealed class Broadcaster
 
     public int ViewerCount => _clients.Count;
     public long FragmentsSent;
+    private long _initReadyTicks;
+    private long _lastFragmentTicks;
+    internal long InitReadyTicks => Interlocked.Read(ref _initReadyTicks);
+    internal long LastFragmentTicks => Interlocked.Read(ref _lastFragmentTicks);
 
     // Updated by the pacing loop each stats window; read by /api/stats.
     public volatile int SourceFps;   // compositor frames/sec (how fast the source actually changes)
@@ -63,6 +67,7 @@ public sealed class Broadcaster
     {
         _init = init;
         _codec = codec;
+        Interlocked.Exchange(ref _initReadyTicks, System.Diagnostics.Stopwatch.GetTimestamp());
         Console.WriteLine($"[mp4] init segment ready ({init.Length} bytes), codec {codec}");
         _initReady.TrySetResult();
     }
@@ -70,6 +75,7 @@ public sealed class Broadcaster
     public void Broadcast(byte[] fragment, bool keyframe)
     {
         Interlocked.Increment(ref FragmentsSent);
+        Interlocked.Exchange(ref _lastFragmentTicks, System.Diagnostics.Stopwatch.GetTimestamp());
         byte[] message = Prefix(fragment);
         foreach (var (id, client) in _clients)
         {

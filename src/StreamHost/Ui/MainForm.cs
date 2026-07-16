@@ -647,7 +647,7 @@ public sealed class MainForm : Form
 
 
     /// <summary>Starts a session and wires its Stopped event, including the automatic
-    /// CPU-encoder retry when a GPU encoder stalls. Returns false if it couldn't start.</summary>
+    /// CPU-encoder retry when the live video pipeline stalls. Returns false if it couldn't start.</summary>
     private bool LaunchSession(SessionConfig config)
     {
         StopIdleServer(); // hand the port to the session
@@ -687,17 +687,21 @@ public sealed class MainForm : Form
                         return;
                     }
 
-                    // GPU encoder stalled or died → restart once on the CPU encoder.
-                    bool encoderFailed = reason == "encoder-stall" || reason.StartsWith("encoder exited");
-                    if (!userRequested && encoderFailed && !_retriedCpu && config.Encoder != "libx264")
+                    // A detected pipeline stall or dead GPU encoder gets one clean
+                    // session restart on the CPU encoder.
+                    bool detectedStall = StreamSession.IsPipelineStallReason(reason);
+                    bool encoderExited = reason.StartsWith("encoder exited", StringComparison.Ordinal);
+                    if (!userRequested && (detectedStall || encoderExited) && !_retriedCpu && config.Encoder != "libx264")
                     {
                         _retriedCpu = true;
                         _pendingCpuRetry = true;
-                        AppendLog("GPU encoder produced no video; restarting with the CPU encoder (libx264)…");
+                        AppendLog(detectedStall
+                            ? "Video pipeline stalled; restarting the session once with libx264…"
+                            : "GPU encoder exited; restarting with the CPU encoder (libx264)…");
                         // Watchdog-detected GPU stalls clear any prior positive verdict
                         // immediately. Keep this Auto-only call for unexpected ffmpeg
                         // exits, which reach fallback without passing through the watchdog.
-                        if (string.IsNullOrEmpty(config.Encoder) || config.Encoder == "auto")
+                        if (encoderExited && (string.IsNullOrEmpty(config.Encoder) || config.Encoder == "auto"))
                             StreamHost.Encode.FfmpegEncoder.InvalidateProbeCache();
                         // libx264 at 1440p and up may not sustain the same resolution/fps
                         // the GPU handled — warn instead of calling fallback a recovery.

@@ -312,17 +312,20 @@ internal static class Program
         session.Start();
         done.Wait();
 
-        // Same one-shot safety net as the GUI: a stalled/dead GPU encoder restarts
-        // the stream on the CPU encoder instead of just exiting.
-        bool encoderFailed = stopReason == "encoder-stall" ||
-                             (stopReason?.StartsWith("encoder exited") ?? false);
-        if (encoderFailed && opts.Encoder != "libx264")
+        // Same one-shot safety net as the GUI: a detected pipeline stall or dead
+        // GPU encoder recreates the session once with the CPU encoder.
+        bool detectedStall = StreamSession.IsPipelineStallReason(stopReason);
+        bool encoderExited = stopReason?.StartsWith("encoder exited",
+            StringComparison.Ordinal) ?? false;
+        if ((detectedStall || encoderExited) && opts.Encoder != "libx264")
         {
-            Console.WriteLine("[encoder] GPU encoder produced no video; restarting with the CPU encoder (libx264)…");
+            Console.WriteLine(detectedStall
+                ? "[pipeline] Video pipeline stalled; restarting the session once with libx264…"
+                : "[encoder] GPU encoder exited; restarting with the CPU encoder (libx264)…");
             // Watchdog-detected GPU stalls clear any prior positive verdict at the
             // detection site. Keep this Auto-only call for unexpected ffmpeg exits,
             // which reach the same fallback without passing through the watchdog.
-            if (string.IsNullOrEmpty(opts.Encoder) || opts.Encoder == "auto")
+            if (encoderExited && (string.IsNullOrEmpty(opts.Encoder) || opts.Encoder == "auto"))
                 StreamHost.Encode.FfmpegEncoder.InvalidateProbeCache();
             // libx264 at 1440p and up may not sustain the same resolution/fps the
             // GPU was handling — warn instead of presenting fallback as recovery.

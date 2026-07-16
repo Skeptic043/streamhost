@@ -29,3 +29,23 @@ public interface ICaptureSource : IDisposable
 
     bool CursorEnabled { set; }
 }
+
+/// <summary>Optional stage-level progress for capture backends whose native work
+/// can block. Stopwatch ticks keep reads cheap and let the session describe the
+/// last completed boundary without logging source names or frame contents.</summary>
+internal interface ICaptureDiagnostics
+{
+    CaptureProgressSnapshot GetProgressSnapshot();
+}
+
+internal readonly record struct CaptureProgressSnapshot(
+    long CallbacksStarted,
+    long FramesReady,
+    long ReadbacksStarted,
+    long ReadbacksCompleted,
+    long LastCallbackTicks,
+    long LastFrameReadyTicks,
+    long LastReadbackStartedTicks,
+    long LastReadbackCompletedTicks,
+    string CallbackStage,
+    string ReadbackStage);

@@ -1,6 +1,17 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 
 namespace StreamHost.Encode;
+
+internal readonly record struct FrameWriterProgress(
+    long FramesEnqueued,
+    long WritesStarted,
+    long WritesCompleted,
+    long LastEnqueueTicks,
+    long LastWriteStartedTicks,
+    long LastWriteCompletedTicks,
+    bool WriteInProgress,
+    bool Failed);
 
 /// <summary>
 /// Decouples the sampling grid from ffmpeg's stdin pipe: the sampler rents a
@@ -15,6 +26,13 @@ public sealed class FrameWriter : IDisposable
     private readonly Thread _thread;
     private readonly FfmpegEncoder _encoder;
     private volatile bool _failed;
+    private long _framesEnqueued;
+    private long _writesStarted;
+    private long _writesCompleted;
+    private long _lastEnqueueTicks;
+    private long _lastWriteStartedTicks;
+    private long _lastWriteCompletedTicks;
+    private int _writeInProgress;
 
     public bool Failed => _failed;
 
@@ -29,9 +47,24 @@ public sealed class FrameWriter : IDisposable
     /// <summary>Blocks when the encoder is behind — that back-pressure is intentional.</summary>
     public byte[] RentBuffer(CancellationToken ct) => _free.Take(ct);
 
-    public void Enqueue(byte[] buffer) => _pending.Add(buffer);
+    public void Enqueue(byte[] buffer)
+    {
+        _pending.Add(buffer);
+        Interlocked.Increment(ref _framesEnqueued);
+        Interlocked.Exchange(ref _lastEnqueueTicks, Stopwatch.GetTimestamp());
+    }
 
     public void ReturnUnused(byte[] buffer) => _free.Add(buffer);
+
+    internal FrameWriterProgress GetProgressSnapshot() => new(
+        Interlocked.Read(ref _framesEnqueued),
+        Interlocked.Read(ref _writesStarted),
+        Interlocked.Read(ref _writesCompleted),
+        Interlocked.Read(ref _lastEnqueueTicks),
+        Interlocked.Read(ref _lastWriteStartedTicks),
+        Interlocked.Read(ref _lastWriteCompletedTicks),
+        Volatile.Read(ref _writeInProgress) != 0,
+        _failed);
 
     private void WriteLoop()
     {
@@ -39,7 +72,19 @@ public sealed class FrameWriter : IDisposable
         {
             foreach (var buffer in _pending.GetConsumingEnumerable())
             {
-                _encoder.WriteFrame(buffer, buffer.Length);
+                Interlocked.Increment(ref _writesStarted);
+                Interlocked.Exchange(ref _lastWriteStartedTicks, Stopwatch.GetTimestamp());
+                Volatile.Write(ref _writeInProgress, 1);
+                try
+                {
+                    _encoder.WriteFrame(buffer, buffer.Length);
+                    Interlocked.Increment(ref _writesCompleted);
+                    Interlocked.Exchange(ref _lastWriteCompletedTicks, Stopwatch.GetTimestamp());
+                }
+                finally
+                {
+                    Volatile.Write(ref _writeInProgress, 0);
+                }
                 _free.Add(buffer);
             }
         }
