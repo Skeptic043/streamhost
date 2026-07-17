@@ -153,7 +153,9 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics
         trace?.Begin(itemStep);
         GraphicsCaptureItem item = createItem();
         trace?.Complete(itemStep);
-        return new ScreenCapture(item, writeDiagnostics, trace);
+        var capture = new ScreenCapture(item, writeDiagnostics, trace);
+        trace?.MarkChainProven();
+        return capture;
     }
 
     private ScreenCapture(GraphicsCaptureItem item, bool writeDiagnostics, CaptureCreationTrace? trace)

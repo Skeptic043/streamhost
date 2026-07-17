@@ -963,7 +963,11 @@ public sealed class MainForm : Form
         // Block preview attachment until _session is assigned.
         IdlePreviewCapture.IdlePreviewStreamFence? previewFence =
             await _idlePreviewCapture.AcquireStreamStartFenceAsync();
-        if (previewFence is null) return false;
+        if (previewFence is null)
+        {
+            AppendLog("Failed to start: idle preview teardown failed. Restart the app if this repeats.");
+            return false;
+        }
 
         StopIdleServer(); // hand the port to the session
         StreamSession session;

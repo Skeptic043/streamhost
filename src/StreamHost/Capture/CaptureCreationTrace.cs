@@ -2,6 +2,11 @@ namespace StreamHost.Capture;
 
 internal sealed class CaptureCreationTrace
 {
+    // Per-step lines exist so the disk log names the exact wedged call even if
+    // the whole process dies mid-creation; once one full chain has completed in
+    // this process the driver path is proven and the lines would be noise.
+    private static volatile bool s_chainProven;
+
     private string _lastCompletedStep = "none";
     private string _currentStep = "not started";
 
@@ -17,7 +22,8 @@ internal sealed class CaptureCreationTrace
     public void Begin(string step)
     {
         Volatile.Write(ref _currentStep, step);
-        Console.WriteLine($"[preview] {TargetKind} creation entering {step}");
+        if (!s_chainProven)
+            Console.WriteLine($"[preview] {TargetKind} creation entering {step}");
     }
 
     public void Complete(string step)
@@ -25,4 +31,6 @@ internal sealed class CaptureCreationTrace
         Volatile.Write(ref _lastCompletedStep, step);
         Volatile.Write(ref _currentStep, "none");
     }
+
+    public void MarkChainProven() => s_chainProven = true;
 }
