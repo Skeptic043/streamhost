@@ -391,8 +391,10 @@ public sealed class MainForm : Form
         _windowCombo.DropDown += (_, _) => PopulateWindows();   // fresh list every open
         _monitorCombo.DropDown += (_, _) => PopulateMonitors(); // monitors change too (dock/undock)
         _rbWindow.CheckedChanged += (_, _) => { UpdateAudioModeLabel(); RefreshSourceOptions(); ScheduleIdlePreviewRefresh(); };
-        _windowCombo.SelectedIndexChanged += (_, _) => { RefreshSourceOptions(); ScheduleIdlePreviewRefresh(); };
-        _monitorCombo.SelectedIndexChanged += (_, _) => { RefreshSourceOptions(); ScheduleIdlePreviewRefresh(); };
+        _windowCombo.SelectedIndexChanged += (_, _) => RefreshSourceOptions();
+        _windowCombo.SelectionChangeCommitted += (_, _) => ScheduleIdlePreviewRefresh();
+        _monitorCombo.SelectedIndexChanged += (_, _) => RefreshSourceOptions();
+        _monitorCombo.SelectionChangeCommitted += (_, _) => ScheduleIdlePreviewRefresh();
         _presetCombo.SelectedIndexChanged += (_, _) => RefreshSourceOptions();
         // The bitrate combo is the single source of truth for the chosen tier:
         // remember every user pick so it survives repopulates (source/preset
