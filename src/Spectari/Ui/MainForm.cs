@@ -1241,14 +1241,14 @@ public sealed class MainForm : Form
         grid.Controls.Add(winCombo, 1, 0);
         grid.Controls.Add(rbMon, 0, 1);
         grid.Controls.Add(monCombo, 1, 1);
-        grid.Controls.Add(new Label { Text = "Preset:", AutoSize = true, Margin = new Padding(3, 8, 3, 0), ForeColor = Dim }, 0, 2);
-        grid.Controls.Add(presetCombo, 1, 2);
-        grid.Controls.Add(new Label { Text = "Bitrate:", AutoSize = true, Margin = new Padding(3, 8, 3, 0), ForeColor = Dim }, 0, 3);
-        grid.Controls.Add(bitrateCombo, 1, 3);
-        grid.Controls.Add(new Label { Text = "Encoder:", AutoSize = true, Margin = new Padding(3, 8, 3, 0), ForeColor = Dim }, 0, 4);
-        grid.Controls.Add(encoderCombo, 1, 4);
-        grid.Controls.Add(new Label { Text = "Audio:", AutoSize = true, Margin = new Padding(3, 8, 3, 0), ForeColor = Dim }, 0, 5);
-        grid.Controls.Add(audioCombo, 1, 5);
+        grid.Controls.Add(new Label { Text = "Audio:", AutoSize = true, Margin = new Padding(3, 8, 3, 0), ForeColor = Dim }, 0, 2);
+        grid.Controls.Add(audioCombo, 1, 2);
+        grid.Controls.Add(new Label { Text = "Preset:", AutoSize = true, Margin = new Padding(3, 8, 3, 0), ForeColor = Dim }, 0, 3);
+        grid.Controls.Add(presetCombo, 1, 3);
+        grid.Controls.Add(new Label { Text = "Bitrate:", AutoSize = true, Margin = new Padding(3, 8, 3, 0), ForeColor = Dim }, 0, 4);
+        grid.Controls.Add(bitrateCombo, 1, 4);
+        grid.Controls.Add(new Label { Text = "Encoder:", AutoSize = true, Margin = new Padding(3, 8, 3, 0), ForeColor = Dim }, 0, 5);
+        grid.Controls.Add(encoderCombo, 1, 5);
 
         var ok = new Button { Text = _session is null ? "Start" : "Switch", Width = 96, Height = 28, DialogResult = DialogResult.OK };
         var cancel = new Button { Text = "Cancel", Width = 80, Height = 28, DialogResult = DialogResult.Cancel };
