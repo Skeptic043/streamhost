@@ -994,9 +994,9 @@ public sealed class MainForm : Form
             return false;
         }
 
-        // Stopped fires only after the session thread finished real teardown
-        // (server disposed, port released), so everything below can restart
-        // immediately without racing the old session for the port.
+        // Stopped fires only after the server is disposed and the port is released.
+        // A stalled native session thread may be abandoned, but its downstream
+        // resources are fenced off before this callback can start a replacement.
         session.Stopped += reason =>
         {
             try

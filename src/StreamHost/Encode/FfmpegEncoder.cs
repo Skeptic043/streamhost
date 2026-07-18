@@ -10,6 +10,9 @@ public sealed class FfmpegEncoder : IDisposable
 {
     private readonly Process _process;
     private readonly Stream _stdin;
+    private readonly object _lifecycleGate = new();
+    private bool _disposed;
+    private int _terminationConfirmed;
 
     public Stream Output => _process.StandardOutput.BaseStream;
     public string EncoderName { get; }
@@ -104,8 +107,32 @@ public sealed class FfmpegEncoder : IDisposable
         _            => "-preset veryfast -tune zerolatency -profile:v high",
     };
 
-    public bool HasExited => _process.HasExited;
-    public int ExitCode { get { try { return _process.HasExited ? _process.ExitCode : 0; } catch { return -1; } } }
+    public bool HasExited
+    {
+        get
+        {
+            lock (_lifecycleGate)
+            {
+                if (_disposed) return true;
+                return _process.HasExited;
+            }
+        }
+    }
+
+    public int ExitCode
+    {
+        get
+        {
+            lock (_lifecycleGate)
+            {
+                if (_disposed) return Volatile.Read(ref _terminationConfirmed) != 0 ? 0 : -1;
+                try { return _process.HasExited ? _process.ExitCode : 0; }
+                catch { return -1; }
+            }
+        }
+    }
+
+    internal bool TerminationConfirmed => Volatile.Read(ref _terminationConfirmed) != 0;
 
     /// <summary>Blocking write of one raw frame; back-pressure comes from the pipe.</summary>
     public void WriteFrame(byte[] frame, int length)
@@ -382,24 +409,72 @@ public sealed class FfmpegEncoder : IDisposable
     }
 
     /// <summary>Breaks a blocked stdin write after the output watchdog has proved
-    /// the live pipeline is stalled. The normal Dispose path still owns cleanup.</summary>
-    internal void AbortForStall()
+    /// the live pipeline is stalled and confirms the child actually exited.</summary>
+    internal bool AbortForStall()
     {
-        try
+        lock (_lifecycleGate)
         {
-            if (!_process.HasExited) _process.Kill(entireProcessTree: true);
+            if (_disposed) return TerminationConfirmed;
+            return TryKillAndConfirmExit(2000);
         }
-        catch { }
     }
 
     public void Dispose()
     {
-        try { _stdin.Close(); } catch { }
+        lock (_lifecycleGate)
+        {
+            if (_disposed) return;
+            try { _stdin.Close(); } catch { }
+            _ = TryStopForDisposal();
+            _process.Dispose();
+            _disposed = true;
+        }
+    }
+
+    private bool TryStopForDisposal()
+    {
         try
         {
-            if (!_process.WaitForExit(2000)) _process.Kill(entireProcessTree: true);
+            if (!_process.WaitForExit(2000))
+            {
+                _process.Kill(entireProcessTree: true);
+                if (!_process.WaitForExit(250)) return false;
+            }
+            Volatile.Write(ref _terminationConfirmed, 1);
+            return true;
         }
-        catch { }
-        _process.Dispose();
+        catch
+        {
+            return ConfirmAlreadyExited();
+        }
+    }
+
+    private bool TryKillAndConfirmExit(int timeoutMs)
+    {
+        try
+        {
+            if (!_process.HasExited)
+            {
+                _process.Kill(entireProcessTree: true);
+                if (!_process.WaitForExit(timeoutMs)) return false;
+            }
+            Volatile.Write(ref _terminationConfirmed, 1);
+            return true;
+        }
+        catch
+        {
+            return ConfirmAlreadyExited();
+        }
+    }
+
+    private bool ConfirmAlreadyExited()
+    {
+        try
+        {
+            if (!_process.HasExited) return false;
+            Volatile.Write(ref _terminationConfirmed, 1);
+            return true;
+        }
+        catch { return false; }
     }
 }

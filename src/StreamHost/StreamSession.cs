@@ -78,8 +78,7 @@ public sealed class StreamSession
     private volatile string? _stallStopReason;
     private volatile string _pacingStage = "not-started";
     private volatile string _teardownStage = "not-started";
-    private readonly ManualResetEventSlim _sessionEnded = new(false);
-    private int _stallDeadlineArmed;
+    private readonly SessionTerminationGate _termination = new();
     private const int TeardownTimeoutMs = 6000;
     private volatile CaptureAdapterIdentity? _captureAdapter;
 
@@ -100,7 +99,7 @@ public sealed class StreamSession
     public int OutputWidth { get; private set; }
     public int OutputHeight { get; private set; }
     public string? ViewKey => _config.ViewKey;
-    public bool IsRunning => _thread is { IsAlive: true };
+    public bool IsRunning => !_termination.IsCompleted && _thread is { IsAlive: true };
     public bool IsStopping => _cts.IsCancellationRequested;
 
     internal static bool IsPipelineStallReason(string? reason) =>
@@ -115,8 +114,12 @@ public sealed class StreamSession
     /// failure (keep the key so an already-copied idle link still works on retry).</summary>
     public bool WentLive { get; private set; }
 
-    /// <summary>Fires when the pipeline ends for any reason (Stop, ffmpeg death, error).</summary>
-    public event Action<string>? Stopped;
+    /// <summary>Fires once the session has released the resources required for a restart.</summary>
+    public event Action<string>? Stopped
+    {
+        add => _termination.Stopped += value;
+        remove => _termination.Stopped -= value;
+    }
 
     public StreamSession(SessionConfig config) => _config = config;
 
@@ -133,11 +136,7 @@ public sealed class StreamSession
             }
             finally
             {
-                Console.WriteLine(reason == "stopped"
-                    ? "[shutdown] done"
-                    : $"[shutdown] stopped: {reason}");
-                _sessionEnded.Set();
-                Stopped?.Invoke(reason);
+                _termination.CompleteFromSession(reason);
             }
         })
         { IsBackground = true, Name = "stream-session" };
@@ -145,9 +144,9 @@ public sealed class StreamSession
     }
 
     /// <summary>Non-blocking stop for the UI: cancel and let the Stopped event
-    /// report when teardown (including port release) actually finished. The
-    /// session thread disposes server/encoder/capture before Stopped fires, so
-    /// "Stopped fired" means the port is free for the next session.</summary>
+    /// report when teardown (including port release) actually finished. A stall
+    /// salvager may abandon native capture, but Stopped still means the port is
+    /// free and ffmpeg is dead before the next session starts.</summary>
     public void RequestStop() => _cts.Cancel();
 
     /// <summary>Blocking stop for process exit paths: don't leave an orphaned
@@ -198,8 +197,7 @@ public sealed class StreamSession
             : _config.CompatibilityCapture
                 ? new DuplicationCapture(_config.MonitorHandle)
                 : new AutoMonitorCapture(_config.MonitorHandle);
-        using var captureLifetime = new TrackedDisposal<ICaptureSource>(
-            capture, "capture", SetTeardownStage);
+        using var captureLifetime = TrackCleanup(capture.Dispose, "capture");
         _captureAdapter = new(capture.GpuVendorId, capture.AdapterLuid, capture.DriverVersion);
         if (_config.NoCursor) capture.CursorEnabled = false;
         Console.WriteLine($"[capture] {_config.SourceName} @ {capture.Width}x{capture.Height}, GPU vendor 0x{capture.GpuVendorId:X4}{(_config.NoCursor ? ", cursor off" : "")}");
@@ -240,7 +238,7 @@ public sealed class StreamSession
         // capture into a dead session and leaks it (busy thread, WASAPI
         // session, the pipe itself). Declared before the ffmpeg/server usings
         // so it runs last, after they are gone.
-        using var audioTeardown = new Teardown(() =>
+        using var audioTeardown = new SalvageableCleanup(() =>
         {
             SetTeardownStage("stopping audio");
             try
@@ -261,8 +259,7 @@ public sealed class StreamSession
 
         var ffmpeg = new FfmpegEncoder(capture.Width, capture.Height, _config.Fps,
             bitrateKbps, outW, outH, encoder, audioPipeName, _config.FragMs);
-        using var ffmpegLifetime = new TrackedDisposal<FfmpegEncoder>(
-            ffmpeg, "ffmpeg", SetTeardownStage);
+        using var ffmpegLifetime = TrackCleanup(ffmpeg.Dispose, "ffmpeg");
 
         if (audioPipe is not null)
         {
@@ -284,8 +281,7 @@ public sealed class StreamSession
         var splitterTask = Task.Run(() => Mp4Splitter.RunAsync(ffmpeg.Output, broadcaster, ct), ct);
 
         var server = new WebServer(_config.Port, broadcaster, _config.ViewKey);
-        using var serverLifetime = new TrackedDisposal<WebServer>(
-            server, "web server", SetTeardownStage);
+        using var serverLifetime = TrackCleanup(server.Dispose, "web server");
         var serverTask = Task.Run(() => server.RunAsync(ct), ct);
         LocalOnly = server.BoundPrefix.Contains("localhost");
         if (LocalOnly)
@@ -339,6 +335,11 @@ public sealed class StreamSession
         // Frames are fed at a fixed rate regardless of screen activity, so a
         // zero-fragment window proves a stall but not which stage caused it.
         var writer = new FrameWriter(ffmpeg, capture.Width * capture.Height * 4);
+        using var writerLifetime = TrackCleanup(writer.Dispose, "ffmpeg frame writer");
+        var stallTeardown = new StallTeardownCoordinator(
+            _termination, TeardownTimeoutMs, _config.Port, ffmpeg, ffmpegLifetime,
+            server.BoundPrefix, serverLifetime, audioTeardown, writerLifetime,
+            captureLifetime);
         var watchdog = new Thread(() =>
         {
             var baseline = TakePipelineBaseline(capture, writer, broadcaster);
@@ -349,7 +350,7 @@ public sealed class StreamSession
             if (!broadcaster.WaitForInit(TimeSpan.FromSeconds(10), ct))
             {
                 if (ct.IsCancellationRequested) return;
-                ReportPipelineStall(capture, writer, broadcaster, ffmpeg, baseline,
+                ReportPipelineStall(capture, writer, broadcaster, ffmpeg, stallTeardown, baseline,
                     $"[pipeline] ffmpeg produced no init segment in 10s while using {ffmpeg.EncoderName}; the live video pipeline is stalled.");
                 return;
             }
@@ -361,7 +362,7 @@ public sealed class StreamSession
                 long produced = total - baseline.Fragments;
                 if (firstWindow ? produced < 5 : produced == 0)
                 {
-                    ReportPipelineStall(capture, writer, broadcaster, ffmpeg, baseline, firstWindow
+                    ReportPipelineStall(capture, writer, broadcaster, ffmpeg, stallTeardown, baseline, firstWindow
                         ? $"[pipeline] ffmpeg wrote the init segment but produced fewer than five fragments in 5s while using {ffmpeg.EncoderName}; the live video pipeline is stalled."
                         : $"[pipeline] ffmpeg output stopped for 5s while using {ffmpeg.EncoderName}; the live video pipeline is stalled.");
                     return;
@@ -381,9 +382,7 @@ public sealed class StreamSession
         finally
         {
             _pacingStage = "stopped";
-            SetTeardownStage("stopping ffmpeg frame writer");
-            writer.Dispose();
-            SetTeardownStage("ffmpeg frame writer stopped");
+            writerLifetime.Dispose();
         }
         SetTeardownStage("pacing loop stopped");
         if (_stallStopReason is { } stallReason) exitReason = stallReason;
@@ -398,8 +397,8 @@ public sealed class StreamSession
     }
 
     private void ReportPipelineStall(ICaptureSource capture, FrameWriter writer,
-        Broadcaster broadcaster, FfmpegEncoder ffmpeg, PipelineBaseline baseline,
-        string diagnostic)
+        Broadcaster broadcaster, FfmpegEncoder ffmpeg,
+        StallTeardownCoordinator stallTeardown, PipelineBaseline baseline, string diagnostic)
     {
         _pipelineStalled = true;
         Console.Error.WriteLine(diagnostic);
@@ -414,11 +413,12 @@ public sealed class StreamSession
         bool inputWriteBlocked = currentWriter.WriteInProgress
             && now - currentWriter.LastWriteStartedTicks >= Stopwatch.Frequency;
         bool reachedFfmpeg = sustainedInput || inputWriteBlocked;
-        _stallStopReason = sustainedInput
+        string stopReason = sustainedInput
             ? "video pipeline stalled after sustained ffmpeg stdin writes; see log"
             : inputWriteBlocked
                 ? "video pipeline stalled at ffmpeg stdin; see log"
                 : "video pipeline stalled before sustained ffmpeg stdin writes; see log";
+        _stallStopReason = stopReason;
 
         LogPipelineProgress(capture, writer, broadcaster, baseline);
         Console.Error.WriteLine(reachedFfmpeg
@@ -436,11 +436,11 @@ public sealed class StreamSession
         else
             Console.Error.WriteLine("[pipeline] CPU recovery is already active; stopping with the stage reason above.");
 
-        ArmStallTeardownDeadline(() => FormatActivePipelineStages(capture, writer));
+        stallTeardown.Arm(stopReason, () => FormatActivePipelineStages(capture, writer));
         SetTeardownStage("stall cancellation requested");
         _cts.Cancel();
-        // Killing the stalled child breaks a blocked stdin write. If native capture
-        // teardown is the part that is wedged, the deadline above still fails closed.
+        // Killing the stalled child breaks a blocked stdin write. The deadline
+        // retries and confirms termination before it releases the remaining pipeline.
         ffmpeg.AbortForStall();
     }
 
@@ -499,27 +499,6 @@ public sealed class StreamSession
         if (then == 0) return "never";
         long ms = (long)(Math.Max(0, now - then) * 1000.0 / Stopwatch.Frequency);
         return ms < 1000 ? $"{ms}ms ago" : $"{ms / 1000.0:F1}s ago";
-    }
-
-    private void ArmStallTeardownDeadline(Func<string> activeStages)
-    {
-        if (Interlocked.Exchange(ref _stallDeadlineArmed, 1) != 0) return;
-        new Thread(() =>
-        {
-            if (_sessionEnded.Wait(TeardownTimeoutMs)) return;
-            try
-            {
-                string stages;
-                try { stages = activeStages(); }
-                catch { stages = "stage snapshot unavailable"; }
-                Console.Error.WriteLine(
-                    $"[shutdown] stall teardown did not finish within {TeardownTimeoutMs / 1000} seconds; {stages}.");
-                Console.Error.WriteLine(
-                    "[shutdown] closing StreamHost to prevent invisible or orphaned capture, server, or ffmpeg work. Reopen it and use Copy log for the stage diagnostics.");
-            }
-            finally { Environment.Exit(1); }
-        })
-        { IsBackground = true, Name = "stall-teardown-deadline" }.Start();
     }
 
     private void SetTeardownStage(string stage)
@@ -653,7 +632,11 @@ public sealed class StreamSession
             catch (OperationCanceledException) { break; }
 
             _pacingStage = "gpu-readback";
-            if (capture.TryReadFrame(buffer))
+            bool frameReady = capture.TryReadFrame(buffer);
+            // A stalled native readback can return after external salvage released
+            // the downstream pipeline. Cancellation fences that late result off.
+            if (ct.IsCancellationRequested) break;
+            if (frameReady)
             {
                 // Produce the A/V epoch at the first enqueue toward ffmpeg. The
                 // audio continuation cannot construct capture until this succeeds.
@@ -719,24 +702,14 @@ public sealed class StreamSession
 
     /// <summary>Owns one pipeline resource and records the exact disposal boundary.
     /// A blocked Dispose leaves the stage at "stopping X" for the deadline log.</summary>
-    private sealed class TrackedDisposal<T>(T resource, string name, Action<string> setStage)
-        : IDisposable where T : IDisposable
+    private SalvageableCleanup TrackCleanup(Action cleanup, string name)
     {
-        private int _disposed;
-
-        public void Dispose()
+        return new SalvageableCleanup(() =>
         {
-            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-            setStage($"stopping {name}");
-            try { resource.Dispose(); }
-            finally { setStage($"{name} stopped"); }
-        }
-    }
-
-    /// <summary>Runs the given cleanup on dispose — scope-exit guard for RunCore.</summary>
-    private sealed class Teardown(Action action) : IDisposable
-    {
-        public void Dispose() => action();
+            SetTeardownStage($"stopping {name}");
+            try { cleanup(); }
+            finally { SetTeardownStage($"{name} stopped"); }
+        });
     }
 
     /// <summary>True iff <paramref name="ip"/> is a Tailscale CGNAT address
