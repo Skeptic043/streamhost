@@ -47,8 +47,11 @@ public static class PortSetup
         }
 
         string remoteip = allowLan ? $"{TailscaleRange},{LanRanges}" : TailscaleRange;
+        Exec($"advfirewall firewall delete rule name=\"Spectari {port}\"");
+        // Legacy cleanup: machines migrating from the pre-rename app still hold a
+        // rule under the old name; leaving it would keep a stale scope open.
         Exec($"advfirewall firewall delete rule name=\"StreamHost {port}\"");
-        if (Exec($"advfirewall firewall add rule name=\"StreamHost {port}\" dir=in action=allow protocol=TCP localport={port} remoteip={remoteip}") != 0)
+        if (Exec($"advfirewall firewall add rule name=\"Spectari {port}\" dir=in action=allow protocol=TCP localport={port} remoteip={remoteip}") != 0)
         {
             // Roll the urlacl back to how we found it: drop ours, restore theirs.
             Exec($"http delete urlacl url=http://+:{port}/");
@@ -59,7 +62,7 @@ public static class PortSetup
             // Tailscale-only default rather than silently reopening the LAN.
             // Best-effort — ignore its exit; the user is never left with no rule.
             string restoreIp = priorRuleRemoteIp ?? TailscaleRange;
-            Exec($"advfirewall firewall add rule name=\"StreamHost {port}\" dir=in action=allow protocol=TCP localport={port} remoteip={restoreIp}");
+            Exec($"advfirewall firewall add rule name=\"Spectari {port}\" dir=in action=allow protocol=TCP localport={port} remoteip={restoreIp}");
             return 3;
         }
 
@@ -131,9 +134,16 @@ public static class PortSetup
     /// the caller fails closed to the Tailscale-only default.</summary>
     private static string? ReadRuleRemoteIp(int port)
     {
+        // On machines migrating from the pre-rename app the prior scope lives
+        // under the old rule name; prefer the current name, then the legacy one.
+        return ReadRuleRemoteIp(port, "Spectari") ?? ReadRuleRemoteIp(port, "StreamHost");
+    }
+
+    private static string? ReadRuleRemoteIp(int port, string ruleApp)
+    {
         try
         {
-            var r = ProcessRunner.Run("netsh", $"advfirewall firewall show rule name=\"StreamHost {port}\"", 5000);
+            var r = ProcessRunner.Run("netsh", $"advfirewall firewall show rule name=\"{ruleApp} {port}\"", 5000);
             foreach (var line in r.StdOut.Split('\n'))
             {
                 int idx = line.IndexOf("RemoteIP:", StringComparison.OrdinalIgnoreCase);
