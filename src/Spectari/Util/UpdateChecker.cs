@@ -7,7 +7,7 @@ namespace Spectari.Util;
 internal static class UpdateChecker
 {
     private static readonly Uri LatestReleaseApiUri = new(
-        "https://api.github.com/repos/Skeptic043/streamhost/releases/latest");
+        "https://api.github.com/repos/Skeptic043/spectari/releases/latest");
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(5);
     private static readonly HttpClient Client = new()
     {
@@ -15,7 +15,7 @@ internal static class UpdateChecker
     };
 
     internal const string LatestReleasePageUrl =
-        "https://github.com/Skeptic043/streamhost/releases/latest";
+        "https://github.com/Skeptic043/spectari/releases/latest";
 
     /// <summary>Makes one anonymous request and returns only tag_name.</summary>
     internal static async Task<string?> GetLatestReleaseTagAsync(CancellationToken cancellationToken)
@@ -26,7 +26,7 @@ internal static class UpdateChecker
             timeout.CancelAfter(RequestTimeout);
 
             using var request = new HttpRequestMessage(HttpMethod.Get, LatestReleaseApiUri);
-            request.Headers.UserAgent.ParseAdd("StreamHost-update-check");
+            request.Headers.UserAgent.ParseAdd("Spectari-update-check");
             request.Headers.Accept.ParseAdd("application/vnd.github+json");
             request.Headers.Add("X-GitHub-Api-Version", "2026-03-10");
 
