@@ -4,7 +4,7 @@ namespace Spectari.Capture;
 
 /// <summary>
 /// Self-managing monitor capture. DEFAULT backend is DXGI desktop duplication
-/// (full-rate delivery — 141 fps measured where WGC capped at ~50 — sees
+/// (full-rate delivery - 141 fps measured where WGC capped at ~50 - sees
 /// exclusive fullscreen, and composites the cursor itself since v0.12).
 /// Windows.Graphics.Capture is the fallback when duplication can't start
 /// (rotated display, another capture app holding the output) or dies. If WGC
@@ -49,7 +49,7 @@ public sealed class AutoMonitorCapture : ICaptureSource
         catch (Exception ex)
         {
             // Duplication can't start here (rotated display, another capture app,
-            // transition in progress) — fall back to standard capture.
+            // transition in progress) - fall back to standard capture.
             Console.WriteLine($"[capture] desktop duplication unavailable ({ex.Message}); using standard capture");
             _active = ScreenCapture.ForMonitor(hMonitor);
         }

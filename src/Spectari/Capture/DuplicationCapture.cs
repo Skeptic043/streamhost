@@ -85,7 +85,7 @@ public sealed class DuplicationCapture : ICaptureSource
         // object only if construction reaches the end.
         try
         {
-            // Capture adapter identity for the init log — on hybrid/multi-GPU boxes the
+            // Capture adapter identity for the init log - on hybrid/multi-GPU boxes the
             // capture adapter need not be the render or encoder adapter.
             try
             {
@@ -94,7 +94,7 @@ public sealed class DuplicationCapture : ICaptureSource
                 var luid = foundAdapter.Description1.Luid;
                 AdapterLuid = $"{luid.HighPart}:{luid.LowPart}";
                 // Best-effort UMD driver version, decoded from the packed long into the
-                // conventional four 16-bit fields — a diagnostics read must never throw
+                // conventional four 16-bit fields - a diagnostics read must never throw
                 // out of the constructor or fail capture.
                 try
                 {
@@ -191,7 +191,7 @@ public sealed class DuplicationCapture : ICaptureSource
             try
             {
                 // Timeout 0, not a blocking wait: with multithread protection on,
-                // AcquireNextFrame holds the device lock for its whole duration —
+                // AcquireNextFrame holds the device lock for its whole duration -
                 // a blocking wait here would stall the pacing thread's Map calls
                 // and collapse the output rate. Poll instead; ~2 ms granularity
                 // (timeBeginPeriod(1)) is far below a frame interval.
@@ -205,7 +205,7 @@ public sealed class DuplicationCapture : ICaptureSource
                 }
                 result.CheckError();
 
-                // The acquire succeeded — we now own the frame and MUST release it
+                // The acquire succeeded - we now own the frame and MUST release it
                 // on every exit path (incl. an exception in the copy, the
                 // QueryInterface, or GetFramePointerShape inside UpdatePointer)
                 // BEFORE the outer catch runs Reduplicate on the duplication object.
@@ -228,7 +228,7 @@ public sealed class DuplicationCapture : ICaptureSource
                 finally
                 {
                     // Guard the release so its own failure can't mask the original
-                    // exception — the outer catch logs that one.
+                    // exception - the outer catch logs that one.
                     try { _duplication.ReleaseFrame(); } catch { }
                 }
                 _hasFrame = true;
@@ -239,7 +239,7 @@ public sealed class DuplicationCapture : ICaptureSource
             catch (Exception ex)
             {
                 if (_cts.IsCancellationRequested) break;
-                // Fullscreen transitions cause temporary access loss — ride them out
+                // Fullscreen transitions cause temporary access loss - ride them out
                 // (~15s of retries) before declaring the backend dead.
                 if (++consecutiveFailures > 60)
                 {

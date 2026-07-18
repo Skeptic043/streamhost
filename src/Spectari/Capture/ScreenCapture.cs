@@ -96,12 +96,12 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics
     public string DriverVersion { get; } = "?";
     public long FramesArrived => Interlocked.Read(ref _framesArrived);
 
-    /// <summary>First exception thrown inside the frame callback, if any — a set value
+    /// <summary>First exception thrown inside the frame callback, if any - a set value
     /// means the capture pipeline is dead and the session should stop with a real error.</summary>
     private volatile Exception? _captureError;
     public Exception? CaptureError => _captureError;
 
-    /// <summary>Monotonic count of frames delivered by the compositor — compare across calls to detect fresh content.</summary>
+    /// <summary>Monotonic count of frames delivered by the compositor - compare across calls to detect fresh content.</summary>
     public long FrameVersion => Interlocked.Read(ref _framesArrived);
 
     CaptureProgressSnapshot ICaptureDiagnostics.GetProgressSnapshot() => new(
@@ -192,7 +192,7 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics
             mt?.SetMultithreadProtected(true);
         trace?.Complete("ID3D11Multithread.SetMultithreadProtected");
 
-        // Capture adapter identity for the init log — on hybrid/multi-GPU boxes the
+        // Capture adapter identity for the init log - on hybrid/multi-GPU boxes the
         // capture adapter need not be the render or encoder adapter.
         trace?.Begin("ID3D11Device.QueryInterface<IDXGIDevice>");
         using (var dxgiDevice = _device.QueryInterface<IDXGIDevice>())
@@ -206,7 +206,7 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics
                 GpuVendorId = (uint)adapter.Description.VendorId;
                 AdapterName = adapter.Description.Description;
                 trace?.Complete("IDXGIAdapter.Description");
-                // Best-effort LUID + UMD driver version — a diagnostics read must never
+                // Best-effort LUID + UMD driver version - a diagnostics read must never
                 // throw out of the constructor or fail capture.
                 trace?.Begin("IDXGIAdapter1 identity queries");
                 try
@@ -217,7 +217,7 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics
                     if (adapter1.CheckInterfaceSupport(typeof(IDXGIDevice), out long umd))
                         DriverVersion = $"{(umd >> 48) & 0xFFFF}.{(umd >> 32) & 0xFFFF}.{(umd >> 16) & 0xFFFF}.{umd & 0xFFFF}";
                 }
-                catch { /* diagnostics only — never fail capture over adapter identity */ }
+                catch { /* diagnostics only - never fail capture over adapter identity */ }
                 trace?.Complete("IDXGIAdapter1 identity queries");
             }
         }
@@ -265,7 +265,7 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics
         _stagingB = _device.CreateTexture2D(desc);
         trace?.Complete("ID3D11Device.CreateTexture2D (staging B)");
 
-        // A closed window/monitor ends the capture permanently — surface it as a
+        // A closed window/monitor ends the capture permanently - surface it as a
         // clean session stop instead of a silent freeze-frame.
         _item.Closed += (_, _) =>
         {
@@ -565,7 +565,7 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics
 
     /// <summary>Copies the most recent frame into <paramref name="buffer"/> as tightly packed BGRA.
     /// Pipelined ping-pong: we queue this tick's GPU copy into one staging texture and map the
-    /// OTHER one (whose copy finished a tick ago), so Map never stalls the context — a stalled
+    /// OTHER one (whose copy finished a tick ago), so Map never stalls the context - a stalled
     /// Map here was blocking FrameArrived and capping WGC delivery at ~50 fps during play.
     /// Costs one frame of extra age, invisible at our buffer sizes.</summary>
     public unsafe bool TryReadFrame(byte[] buffer)
@@ -594,7 +594,7 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics
                 mapped = _context.Map(readFrom, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
             }
 
-            // The 14 MB row copy happens WITHOUT the lock — reading a mapped pointer is
+            // The 14 MB row copy happens WITHOUT the lock - reading a mapped pointer is
             // not a context call, and FrameArrived never touches the mapped resource.
             try
             {

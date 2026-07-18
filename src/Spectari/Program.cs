@@ -32,7 +32,7 @@ internal static class Program
         }
 
         // WinForms needs Windows culture data for input-language messages, while
-        // StreamHost's own numeric, version, and command formatting stays invariant.
+        // Spectari's own numeric, version, and command formatting stays invariant.
         CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
         CultureInfo.DefaultThreadCurrentUICulture = CultureInfo.InvariantCulture;
 
@@ -60,7 +60,7 @@ internal static class Program
             {
                 EnsureConsole();
                 if (!ConfirmForeignReservation(setupPort))
-                    return 4; // refused / couldn't confirm — nothing changed
+                    return 4; // refused / couldn't confirm - nothing changed
             }
             return Util.PortSetup.Run(setupPort, setupUser, allowLan);
         }
@@ -114,9 +114,9 @@ internal static class Program
             try
             {
                 System.Windows.Forms.MessageBox.Show(
-                    $"StreamHost hit an unexpected error.\n\n{e.Exception.Message}\n\n" +
+                    $"Spectari hit an unexpected error.\n\n{e.Exception.Message}\n\n" +
                     $"Details were written to the log file:\n{Util.ConsoleMirror.LogFilePath}",
-                    "StreamHost", System.Windows.Forms.MessageBoxButtons.OK,
+                    "Spectari", System.Windows.Forms.MessageBoxButtons.OK,
                     System.Windows.Forms.MessageBoxIcon.Error);
             }
             catch { }
@@ -140,9 +140,9 @@ internal static class Program
     }
 
     /// <summary>Fatal-exception exit (Brian's decision): don't resume the message
-    /// loop into a half-broken app. Stop any live session gracefully — bounded, so a
+    /// loop into a half-broken app. Stop any live session gracefully - bounded, so a
     /// wedged session can't hang shutdown; ChildJob kills ffmpeg with the process
-    /// regardless — then exit nonzero. The UI-thread handler already stops the session
+    /// regardless - then exit nonzero. The UI-thread handler already stops the session
     /// before its dialog, so this stop is often a harmless no-op; the background
     /// (dialog-less) path relies on this one. Never throws.</summary>
     private static void ExitAfterFatal()
@@ -161,7 +161,7 @@ internal static class Program
             var w = Console.Error;
             var t = Thread.CurrentThread;
             w.WriteLine($"[crash] {(fatal ? "FATAL" : "unhandled")} on {origin} thread '{t.Name ?? "?"}' (#{Environment.CurrentManagedThreadId})");
-            w.WriteLine($"[crash] StreamHost {MainForm.AppVersion()} on {Environment.OSVersion.VersionString}");
+            w.WriteLine($"[crash] Spectari {MainForm.AppVersion()} on {Environment.OSVersion.VersionString}");
             w.WriteLine($"[crash] {Ui.AppRunContext.Current?.DescribeState() ?? "no window context"}");
             w.WriteLine($"[crash] {ex?.ToString() ?? "(no exception object)"}");
         }
@@ -169,7 +169,7 @@ internal static class Program
     }
 
     /// <summary>The exe is WinExe (no console window on double-click), so console
-    /// mode has to attach to the launching terminal — or create a console when
+    /// mode has to attach to the launching terminal - or create a console when
     /// started with args from Explorer. When stdout was redirected at launch
     /// (piping, > file) the handles already work and nothing is touched.</summary>
     private static void EnsureConsole()
@@ -188,7 +188,7 @@ internal static class Program
     /// <summary>Interactive (setup.bat) guard: refuse to replace a URL reservation
     /// owned by another account without a typed yes. The "Open port" button makes
     /// this same check before it elevates; the bat relies on this instead. Fails
-    /// CLOSED — if the owner can't be read, or there's no console to read a reply
+    /// CLOSED - if the owner can't be read, or there's no console to read a reply
     /// from, it keeps the existing reservation rather than destroying a foreign
     /// one.</summary>
     private static bool ConfirmForeignReservation(int port)
@@ -208,7 +208,7 @@ internal static class Program
         if (owner == Util.PortSetup.UnknownOwner)
         {
             Console.WriteLine();
-            Console.WriteLine($"  Port {port}'s URL reservation is held by an account StreamHost could not read.");
+            Console.WriteLine($"  Port {port}'s URL reservation is held by an account Spectari could not read.");
             Console.WriteLine("  Not replacing it. Pick a different port instead.");
             return false;
         }
@@ -217,7 +217,7 @@ internal static class Program
         Console.WriteLine($"  Port {port} is already reserved by another account:");
         Console.WriteLine($"    {owner}");
         Console.WriteLine("  Replacing it may break the app that created it.");
-        Console.Write("  Replace it with StreamHost's reservation? [y/N] ");
+        Console.Write("  Replace it with Spectari's reservation? [y/N] ");
         string? answer = Console.ReadLine()?.Trim();
         if (string.Equals(answer, "y", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(answer, "yes", StringComparison.OrdinalIgnoreCase))
@@ -240,7 +240,7 @@ internal static class Program
         catch (ArgumentException ex)
         {
             Console.Error.WriteLine($"Error: {ex.Message}");
-            Console.Error.WriteLine("Run StreamHost --help for usage.");
+            Console.Error.WriteLine("Run Spectari --help for usage.");
             return 2;
         }
         if (opts.ShowHelp) { PrintHelp(); return 0; }
@@ -344,7 +344,7 @@ internal static class Program
             if (encoderExited && (string.IsNullOrEmpty(opts.Encoder) || opts.Encoder == "auto"))
                 Spectari.Encode.FfmpegEncoder.InvalidateProbeCache();
             // libx264 at 1440p and up may not sustain the same resolution/fps the
-            // GPU was handling — warn instead of presenting fallback as recovery.
+            // GPU was handling - warn instead of presenting fallback as recovery.
             if (session.OutputHeight >= 1440)
                 Console.WriteLine($"[encoder] warning: libx264 (CPU) may not keep up at {session.OutputWidth}x{session.OutputHeight}@{opts.Fps}; lower the Preset if playback is choppy.");
             Thread.Sleep(800); // let the port release
@@ -431,11 +431,11 @@ internal static class Program
 
     private static void PrintHelp()
     {
-        Console.WriteLine("StreamHost                     -> app window");
-        Console.WriteLine("StreamHost [--monitor N | --window \"title/exe\"] [--fps 30|60] [--bitrate kbps, 0=auto] [--port N]");
+        Console.WriteLine("Spectari                     -> app window");
+        Console.WriteLine("Spectari [--monitor N | --window \"title/exe\"] [--fps 30|60] [--bitrate kbps, 0=auto] [--port N]");
         Console.WriteLine("           [--height 1080] [--encoder auto|h264_nvenc|h264_amf|h264_qsv|libx264] [--max-viewers N, 0=unlimited]");
         Console.WriteLine("           [--name \"shown to viewers\"] [--audio \"app\"] [--no-audio] [--no-cursor] [--frag-ms N]");
         Console.WriteLine("           [--no-key (viewer links work without ?k=)] [--list-monitors] [--list-windows]");
-        Console.WriteLine("StreamHost --setup-port N [--setup-user \"DOMAIN\\user\"] [--setup-lan] [--setup-confirm]  -> reserve URL + firewall (admin)");
+        Console.WriteLine("Spectari --setup-port N [--setup-user \"DOMAIN\\user\"] [--setup-lan] [--setup-confirm]  -> reserve URL + firewall (admin)");
     }
 }

@@ -29,7 +29,7 @@ public static class ProcessRunner
             CreateNoWindow = true,
         };
 
-        // Process.Start throws on a missing exe (Win32Exception); let it — the
+        // Process.Start throws on a missing exe (Win32Exception); let it - the
         // callers catch it. Start() with these options never returns null.
         using var p = Process.Start(psi)!;
         ChildJob.Adopt(p); // dies with us even if this runner somehow leaks it

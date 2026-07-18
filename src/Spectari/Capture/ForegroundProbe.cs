@@ -2,7 +2,7 @@ using System.Runtime.InteropServices;
 
 namespace Spectari.Capture;
 
-/// <summary>Detects "a fullscreen app is focused on this monitor" — the signal that
+/// <summary>Detects "a fullscreen app is focused on this monitor" - the signal that
 /// standard capture starvation is a fullscreen problem rather than a static screen.</summary>
 public static class ForegroundProbe
 {

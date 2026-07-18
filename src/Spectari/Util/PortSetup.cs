@@ -19,19 +19,19 @@ public static class PortSetup
     // Returned by ReadReservationOwner when the URL is reserved but its owner
     // can't be read (a non-English Windows where the "User:" line is labelled
     // differently). The interactive setup path treats this as "do not touch".
-    public const string UnknownOwner = "an account StreamHost could not identify";
+    public const string UnknownOwner = "an account Spectari could not identify";
 
     public static int Run(int port, string? user, bool allowLan)
     {
         // The UAC prompt may elevate as a different account than the one that
-        // will run StreamHost, so the unelevated app passes its own identity.
+        // will run Spectari, so the unelevated app passes its own identity.
         user ??= $"{Environment.UserDomainName}\\{Environment.UserName}";
 
         // Capture whatever account currently holds this URL so a half-failed
         // setup can put it back instead of leaving nothing reserved. Reading the
         // reservation needs no admin; the mutating netsh calls below do. Restore
-        // re-grants the prior USER account only — it does not preserve a full
-        // custom SDDL — which is acceptable here and far better than silently
+        // re-grants the prior USER account only - it does not preserve a full
+        // custom SDDL - which is acceptable here and far better than silently
         // destroying a foreign reservation.
         string? priorUser = ReadReservationUser(port);
         // Also capture the firewall rule's current scope, so a failed add can put
@@ -60,7 +60,7 @@ public static class PortSetup
             // The failed add followed a delete, so no rule is left. Re-add one at
             // the prior scope; if that scope was unreadable, fail CLOSED to the
             // Tailscale-only default rather than silently reopening the LAN.
-            // Best-effort — ignore its exit; the user is never left with no rule.
+            // Best-effort - ignore its exit; the user is never left with no rule.
             string restoreIp = priorRuleRemoteIp ?? TailscaleRange;
             Exec($"advfirewall firewall add rule name=\"Spectari {port}\" dir=in action=allow protocol=TCP localport={port} remoteip={restoreIp}");
             return 3;
@@ -95,7 +95,7 @@ public static class PortSetup
     /// <summary>The account currently granted this URL, with FAIL-CLOSED semantics
     /// for the interactive (setup.bat) confirm: null ONLY when the probe ran cleanly
     /// and nothing is reserved; the owner string when the "User:" line parses; or
-    /// <see cref="UnknownOwner"/> for every not-cleanly-known case — reserved but the
+    /// <see cref="UnknownOwner"/> for every not-cleanly-known case - reserved but the
     /// owner can't be read, a probe timeout, a nonzero netsh exit, or netsh failing
     /// to launch at all. The sentinel keeps a caller from deleting a reservation it
     /// could not positively read as either absent or its own. Distinct from

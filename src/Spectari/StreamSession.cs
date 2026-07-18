@@ -65,7 +65,7 @@ public sealed class StreamSession
     private Thread? _thread;
 
     // Audio capture is created asynchronously (when ffmpeg connects to the pipe),
-    // so creation and disposal race on quick start→stop — the gate makes disposal
+    // so creation and disposal race on quick start→stop - the gate makes disposal
     // either find the instance or prevent it from being created at all.
     private readonly Lock _audioGate = new();
     private Audio.ProcessAudioCapture? _audioCapture;
@@ -189,7 +189,7 @@ public sealed class StreamSession
             return "the selected window no longer exists";
         }
         // Monitor shares are self-managing (desktop duplication by default,
-        // standard capture as fallback and for window shares — see
+        // standard capture as fallback and for window shares - see
         // AutoMonitorCapture). --compat-capture forces duplication-only,
         // kept for diagnostics.
         ICaptureSource capture;
@@ -235,14 +235,14 @@ public sealed class StreamSession
         if (_config.BitrateKbps <= 0)
             Console.WriteLine($"[encoder] auto bitrate for {outH}p{_config.Fps}: {bitrateKbps} kbps");
 
-        string? audioPipeName = _config.AudioPid != 0 ? $"streamhost_audio_{_config.Port}" : null;
+        string? audioPipeName = _config.AudioPid != 0 ? $"spectari_audio_{_config.Port}" : null;
         NamedPipeServerStream? audioPipe = null;
         if (audioPipeName is not null)
             audioPipe = new NamedPipeServerStream(audioPipeName, PipeDirection.Out, 1,
                 PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
 
-        // Every exit path — including a failed port bind throwing out of the
-        // WebServer constructor below — must cancel and release the audio
+        // Every exit path - including a failed port bind throwing out of the
+        // WebServer constructor below - must cancel and release the audio
         // machinery: the pipe-connection continuation otherwise creates a
         // capture into a dead session and leaks it (busy thread, WASAPI
         // session, the pipe itself). Declared before the ffmpeg/server usings
@@ -298,7 +298,7 @@ public sealed class StreamSession
 
         // First-frame gate: Windows capture always delivers the current contents
         // immediately on start, so "no frame within 5s" reliably means the capture
-        // backend is broken on this machine — fail loudly instead of looking live.
+        // backend is broken on this machine - fail loudly instead of looking live.
         Description = $"{outW}x{outH}@{_config.Fps} ~{bitrateKbps}kbps";
         var gateStart = Stopwatch.GetTimestamp();
         while (capture.FrameVersion == 0)
@@ -321,7 +321,7 @@ public sealed class StreamSession
         broadcaster.State = "live";
         WentLive = true;
         // Console users have no other way to get the link, so the key is printed
-        // (and therefore lands in the log file) — the support bundle strips it.
+        // (and therefore lands in the log file) - the support bundle strips it.
         string keySuffix = _config.ViewKey is null ? "" : $"?k={_config.ViewKey}";
         Console.WriteLine($"[ready] first frame captured; streaming {Description} via {encoder}");
         Console.WriteLine($"[ready] watch at: http://localhost:{_config.Port}/{keySuffix}");
@@ -354,7 +354,7 @@ public sealed class StreamSession
             var baseline = TakePipelineBaseline(capture, writer, broadcaster);
             // Wait for the header first: fragments cannot exist before it, and
             // on a machine pegged by the game ffmpeg's startup alone can eat
-            // seconds — the old fixed window (counted from the first captured
+            // seconds - the old fixed window (counted from the first captured
             // frame) tripped on slow starts and blamed the encoder.
             if (!broadcaster.WaitForInit(TimeSpan.FromSeconds(10), ct))
             {
@@ -686,7 +686,7 @@ public sealed class StreamSession
     }
 
     /// <summary>Low/Medium/High bitrate options for an output size. Classified by
-    /// pixel AREA, not height — a 1080x1871 portrait window has 1080p-class pixels
+    /// pixel AREA, not height - a 1080x1871 portrait window has 1080p-class pixels
     /// and must not be billed as 4K just because it is tall. Boundaries are the
     /// midpoints between the 16:9 standard sizes, 30 fps gets two thirds (rounded
     /// to 0.5 Mbps), and High at 4K is the ceiling: nothing ever exceeds 35 Mbps.
@@ -738,7 +738,7 @@ public sealed class StreamSession
     /// <summary>Shareable IPv4s, best first. Ranks by the owning adapter, not just
     /// the address range: an active Tailscale interface wins, then physical private
     /// LAN adapters with a default route. Hyper-V/WSL/Docker/VM adapters and
-    /// link-local addresses are excluded entirely — copying one of those produced
+    /// link-local addresses are excluded entirely - copying one of those produced
     /// links that worked for the streamer and nobody else. When
     /// <paramref name="includeLan"/> is false, only Tailscale addresses are
     /// returned (LAN links aren't reachable unless LAN access was applied).</summary>

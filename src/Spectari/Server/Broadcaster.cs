@@ -55,7 +55,7 @@ public sealed class Broadcaster
     public volatile string State = "starting"; // starting → live → stopped/failed
     public bool HasAudio { get; set; }
 
-    /// <summary>Blocks until ffmpeg's header (init segment) has arrived — the
+    /// <summary>Blocks until ffmpeg's header (init segment) has arrived - the
     /// earliest moment fragment production can possibly start.</summary>
     public bool WaitForInit(TimeSpan timeout, CancellationToken ct)
     {
@@ -106,7 +106,7 @@ public sealed class Broadcaster
     {
         var id = Guid.NewGuid();
 
-        // Reserve a slot ATOMICALLY before any work — counting this in-flight
+        // Reserve a slot ATOMICALLY before any work - counting this in-flight
         // handshake even while it waits on the init segment. Interlocked makes
         // concurrent handshakes serialize, so a burst can't overshoot MaxViewers
         // the way the old non-atomic _clients.Count check could. Over the cap:
@@ -160,7 +160,7 @@ public sealed class Broadcaster
                 Socket = socket,
                 // FullMode must be Wait: it makes the non-blocking TryWrite return
                 // FALSE when full, which is our overload signal. (DropWrite would
-                // return true and silently discard — corrupting the stream instead
+                // return true and silently discard - corrupting the stream instead
                 // of triggering the keyframe resync.)
                 Queue = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(180)
                 {
@@ -172,7 +172,7 @@ public sealed class Broadcaster
             Console.WriteLine($"[ws] viewer connected ({_clients.Count} total)");
 
             // Drain incoming (close frames, pings); we never expect data from
-            // viewers. When this loop ends — peer closed or errored — its finally
+            // viewers. When this loop ends - peer closed or errored - its finally
             // cancels the linked token so the send loop unblocks immediately, not
             // only when the next fragment fails to send.
             receiveLoop = Task.Run(async () =>

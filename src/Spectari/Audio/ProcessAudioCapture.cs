@@ -10,21 +10,21 @@ namespace Spectari.Audio;
 /// Output: 48 kHz stereo float32 interleaved blocks via the Read callback.
 ///
 /// Timeline discipline: real packets (even silent-flagged ones) carry the
-/// clock — WASAPI loopback delivers them at the render rate, so as long as the
+/// clock - WASAPI loopback delivers them at the render rate, so as long as the
 /// app keeps an audio stream open the byte count tracks real time on its own.
 /// Only when the app stops rendering entirely (no packets at all for &gt;150 ms)
 /// does a wall-clock fill, anchored at the moment packets stopped, advance the
 /// timeline with silence. That keeps the mp4 muxer moving: it interleaves by
 /// timestamp and would otherwise sit on finished video fragments waiting for
 /// audio that never comes (the header-then-no-video stall). We do NOT try to
-/// reconcile against WASAPI device positions — for a quiet process those
+/// reconcile against WASAPI device positions - for a quiet process those
 /// positions stall while the wall clock keeps ticking, so trusting them just
 /// fought the idle fill and produced choppy audio.
 ///
 /// The WASAPI drain loop never blocks on the consumer: samples go through a
 /// bounded queue to a writer thread. On overflow (encoder briefly not draining)
 /// the OLDEST queued block is dropped so playback resumes near the live edge,
-/// and the dropped span's DURATION is owed back as silence — ffmpeg gets raw
+/// and the dropped span's DURATION is owed back as silence - ffmpeg gets raw
 /// float with no timestamps, so replaying a matching length of silence is the
 /// only way to keep A/V in sync. Owed silence is repaid as a CONTIGUOUS gap
 /// into free queue room the moment the stall clears (a hitch plays as a brief
@@ -74,7 +74,7 @@ public sealed class ProcessAudioCapture : IDisposable
 
         // REL-2: everything past activation is transactional. If format setup,
         // Initialize, GetService, or Start throws, release the client before
-        // rethrowing — otherwise a half-built capture leaks it and its threads
+        // rethrowing - otherwise a half-built capture leaks it and its threads
         // never start to be disposed.
         bool clientStarted = false;
         try
@@ -123,7 +123,7 @@ public sealed class ProcessAudioCapture : IDisposable
         catch
         {
             // REL-2: release both COM objects we may have acquired before the throw.
-            // _capture is a readonly field — it reads null unless GetService ran, so
+            // _capture is a readonly field - it reads null unless GetService ran, so
             // the null check keeps the pre-GetService failure path safe.
             if (clientStarted) { try { _client.Stop(); } catch { } }
             try { if (_capture is not null) Marshal.FinalReleaseComObject(_capture); } catch { }
@@ -156,7 +156,7 @@ public sealed class ProcessAudioCapture : IDisposable
         IntPtr mmcss = ConfigureMmcss();
         // REL-1 / honest log: one line so a live session shows audio came up, worded
         // by whether MMCSS actually handed us a Pro Audio handle (else we kept
-        // ThreadPriority.Highest). Logged here — the ctor can't know the outcome.
+        // ThreadPriority.Highest). Logged here - the ctor can't know the outcome.
         Console.WriteLine($"[audio] capture started (process loopback, 48 kHz stereo{(mmcss != IntPtr.Zero ? ", MMCSS Pro Audio" : ", thread priority Highest")})");
         try
         {
@@ -190,7 +190,7 @@ public sealed class ProcessAudioCapture : IDisposable
                     {
                         got = true;
 
-                        // Emit every real packet, silent-flagged or not — a silent packet
+                        // Emit every real packet, silent-flagged or not - a silent packet
                         // is real render time and keeps the clock advancing without any
                         // idle fill. Copy only when it carries actual samples.
                         int bytes = (int)frames * BytesPerFrame;
@@ -256,12 +256,12 @@ public sealed class ProcessAudioCapture : IDisposable
         catch (InvalidOperationException) { return false; } // collection completed during shutdown
     }
 
-    /// <summary>Accrue owed silence, bounded by MaxCatchupBytes — beyond the ceiling
+    /// <summary>Accrue owed silence, bounded by MaxCatchupBytes - beyond the ceiling
     /// the excess dropped duration is accepted as a bounded residual.</summary>
     private void OweSilence(long bytes) => _owedSilenceBytes = Math.Min(_owedSilenceBytes + bytes, MaxCatchupBytes);
 
-    // Drain owed silence into the queue as a CONTIGUOUS run — as much as fits right
-    // now, not one block per call — so a cleared hitch plays as a short clean gap
+    // Drain owed silence into the queue as a CONTIGUOUS run - as much as fits right
+    // now, not one block per call - so a cleared hitch plays as a short clean gap
     // then live audio. Non-blocking: when the queue is full nothing is injected, so
     // fresh audio still wins during an active overflow. Each block enqueued advances
     // the clock (I2: silence counts only once it is actually delivered).
@@ -280,7 +280,7 @@ public sealed class ProcessAudioCapture : IDisposable
     /// first (drop-oldest when the queue is full), so a sustained slowdown keeps fresh
     /// flowing and can never become permanent silence; a dropped or removed block
     /// advances the clock by nothing net (the removed oldest is uncounted from
-    /// _deliveredFrames) — its duration is owed as silence. Owed silence is then repaid into
+    /// _deliveredFrames) - its duration is owed as silence. Owed silence is then repaid into
     /// whatever room REMAINS: a no-op while the queue stays full (owed accrues, bounded),
     /// a contiguous gap once the stall clears (resync). So a transient stall becomes a
     /// brief silence gap then live audio, never permanent silence, never desync.</summary>
@@ -298,7 +298,7 @@ public sealed class ProcessAudioCapture : IDisposable
             {
                 // TryTake only removes a block the writer never consumed. It was
                 // counted into _deliveredFrames at its own enqueue, so uncount it
-                // here before owing its duration back as silence — otherwise the
+                // here before owing its duration back as silence - otherwise the
                 // clock would count it twice (once now, once when the silence repays).
                 _deliveredFrames -= stale.Length / BytesPerFrame;
                 OweSilence(stale.Length);
@@ -382,7 +382,7 @@ public sealed class ProcessAudioCapture : IDisposable
 
             if (!handler.Done.WaitOne(TimeSpan.FromSeconds(5)))
                 // Timed out: a late ActivateCompleted may still fire and touch Done, so
-                // we do NOT dispose it here — leave it for GC (Set() is disposed-tolerant
+                // we do NOT dispose it here - leave it for GC (Set() is disposed-tolerant
                 // as a further belt).
                 throw new TimeoutException("ActivateAudioInterfaceAsync timed out");
 
@@ -420,12 +420,12 @@ public sealed class ProcessAudioCapture : IDisposable
         _disposed = true;
         _cts.Cancel();
         // Stop the WASAPI client first so the capture thread's reads drain and it
-        // exits promptly; only then complete the queue (producer is done — TryEnqueue
+        // exits promptly; only then complete the queue (producer is done - TryEnqueue
         // also tolerates a late completion as a belt) and join the writer.
         try { _client.Stop(); } catch { }
         // Gate the COM release on the capture thread ACTUALLY having stopped: releasing
         // _capture/_client while a live capture thread is still calling into them is a
-        // use-after-free. If the thread is wedged, skip the release — a leaked COM object
+        // use-after-free. If the thread is wedged, skip the release - a leaked COM object
         // on a stuck thread is the lesser evil.
         bool captureStopped = _thread.Join(2000);
         _queue.CompleteAdding();

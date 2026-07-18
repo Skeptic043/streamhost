@@ -1,9 +1,9 @@
 @echo off
 setlocal
-REM StreamHost one-time setup. Usage: setup.bat [port]   (default 8093)
+REM Spectari one-time setup. Usage: setup.bat [port]   (default 8093)
 REM
 REM This is the manual fallback for the app's "Open port" button. It just
-REM elevates and hands the work to StreamHost.exe, which reserves the stream
+REM elevates and hands the work to Spectari.exe, which reserves the stream
 REM URL for this user and opens the firewall to Tailscale (100.64.0.0/10).
 REM
 REM LAN viewers are not offered here. Turn that on inside the app: tick
@@ -24,21 +24,21 @@ if %errorlevel% neq 0 (
 set "PORT=%~1"
 if "%PORT%"=="" set "PORT=8093"
 
-set "EXE=%~dp0StreamHost.exe"
+set "EXE=%~dp0Spectari.exe"
 if not exist "%EXE%" (
     echo.
-    echo   Could not find StreamHost.exe next to this script.
-    echo   Keep setup.bat in the same folder as StreamHost.exe and run it there.
+    echo   Could not find Spectari.exe next to this script.
+    echo   Keep setup.bat in the same folder as Spectari.exe and run it there.
     echo.
     pause
     exit /b 1
 )
 
 echo.
-echo Opening port %PORT% for StreamHost so viewers on Tailscale can connect...
+echo Opening port %PORT% for Spectari so viewers on Tailscale can connect...
 echo.
 
-REM StreamHost.exe is a GUI-subsystem program, so cmd would not wait for it on
+REM Spectari.exe is a GUI-subsystem program, so cmd would not wait for it on
 REM its own. "start /wait" waits for it and reports its exit code in ERRORLEVEL.
 REM --setup-confirm makes it ask before replacing a reservation owned by someone
 REM else. Capture the code right away, before anything else touches ERRORLEVEL.

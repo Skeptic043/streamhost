@@ -14,11 +14,11 @@ public sealed class MainForm : Form
 {
     // ---- palette ----------------------------------------------------------
     // Softened: lighter surfaces, lower-contrast text, muted status colors.
-    // Rule: NEVER disable a control — WinForms paints disabled text in fixed
+    // Rule: NEVER disable a control - WinForms paints disabled text in fixed
     // gray that's unreadable on dark backgrounds. Radios/logic decide what's
     // USED; everything stays clickable and readable.
     // One deliberate exception (v0.15, user request): while LIVE, the pickers
-    // that only take effect through a restart are disabled — the dimming is
+    // that only take effect through a restart are disabled - the dimming is
     // the point, it funnels changes through the Switch source button.
     private static readonly Color Bg = Color.FromArgb(31, 33, 39);
     private static readonly Color Card = Color.FromArgb(42, 45, 53);
@@ -78,7 +78,7 @@ public sealed class MainForm : Form
         public string SourceKind { get; set; } = "window";
         public string WindowProcess { get; set; } = "";
         public int MonitorIndex { get; set; }
-        // Presets are stored by height+fps, not array index — adding a preset
+        // Presets are stored by height+fps, not array index - adding a preset
         // used to silently shift everyone's saved choice.
         public int PresetHeight { get; set; } = 1080;
         public int PresetFps { get; set; } = 60;
@@ -252,7 +252,7 @@ public sealed class MainForm : Form
     public MainForm()
     {
         Console.WriteLine("[boot] form constructor enter");
-        Text = "StreamHost";
+        Text = "Spectari";
         MinimumSize = new Size(680, 600);
         Size = new Size(760, 690);
         StartPosition = FormStartPosition.CenterScreen;
@@ -387,7 +387,7 @@ public sealed class MainForm : Form
         _linkBox.BackColor = Card;
         _linkBox.ForeColor = Dim;
 
-        // Nothing gets disabled — the selected radio decides which combo is USED.
+        // Nothing gets disabled - the selected radio decides which combo is USED.
         _windowCombo.DropDown += (_, _) => PopulateWindows();   // fresh list every open
         _monitorCombo.DropDown += (_, _) => PopulateMonitors(); // monitors change too (dock/undock)
         _rbWindow.CheckedChanged += (_, _) => { UpdateAudioModeLabel(); RefreshSourceOptions(); ScheduleIdlePreviewRefresh(); };
@@ -818,7 +818,7 @@ public sealed class MainForm : Form
     }
 
     /// <summary>"Captured window's audio" is a trap during a monitor share (it
-    /// resolves to silence) — relabel it so people pick an actual app instead.</summary>
+    /// resolves to silence) - relabel it so people pick an actual app instead.</summary>
     private void UpdateAudioModeLabel()
     {
         if (_audioCombo.Items.Count < 2) return;
@@ -1034,7 +1034,7 @@ public sealed class MainForm : Form
                         if (encoderExited && (string.IsNullOrEmpty(config.Encoder) || config.Encoder == "auto"))
                             Spectari.Encode.FfmpegEncoder.InvalidateProbeCache();
                         // libx264 at 1440p and up may not sustain the same resolution/fps
-                        // the GPU handled — warn instead of calling fallback a recovery.
+                        // the GPU handled - warn instead of calling fallback a recovery.
                         if (session.OutputHeight >= 1440)
                             AppendLog($"Warning: libx264 (CPU) may not keep up at {session.OutputWidth}x{session.OutputHeight}@{config.Fps}; lower the Preset if playback is choppy.");
                         var fallback = config with { Encoder = "libx264" };
@@ -1368,7 +1368,7 @@ public sealed class MainForm : Form
         _stopping = false;
         _startButton.Text = "▶  Start streaming";
         _startButton.BackColor = AccentDark;
-        Text = "StreamHost";
+        Text = "Spectari";
         _livePort = 0;
         SetLiveLock(false);
         // A run that actually served viewers rotates the viewer key, so links from
@@ -1412,7 +1412,7 @@ public sealed class MainForm : Form
         }
         catch (Exception ex)
         {
-            // Not fatal — usually another program owns the port right now. Log it
+            // Not fatal - usually another program owns the port right now. Log it
             // once (not every retry), then keep retrying quietly so the holding
             // page comes back on its own the moment the port frees up.
             if (!_idleBindFailed)
@@ -1437,7 +1437,7 @@ public sealed class MainForm : Form
         _idleServer = null;
     }
 
-    /// <summary>Port or name changed while idle — rebind so the holding page follows.</summary>
+    /// <summary>Port or name changed while idle - rebind so the holding page follows.</summary>
     private void RestartIdleServer()
     {
         if (_session is not null || _stopping) return;
@@ -1640,7 +1640,7 @@ public sealed class MainForm : Form
         {
             // A Tailscale address is always reachable (99% path). Otherwise LAN
             // is reachable only if LAN access was actually applied. With neither,
-            // the stream is up but nobody can reach it — warn instead of green.
+            // the stream is up but nobody can reach it - warn instead of green.
             var addrs = StreamSession.GetShareAddresses(includeLan: true);
             bool tailscaleReachable = addrs.Any(StreamSession.IsTailscaleAddress);
             bool lanReachable = !tailscaleReachable && LanAppliedForPort(_livePort)
@@ -1657,7 +1657,7 @@ public sealed class MainForm : Form
                 _statusLabel.Text = "LIVE, but no reachable address in the current scope. Start Tailscale, or check Allow LAN and click Open port in Misc.";
             }
         }
-        Text = $"StreamHost - LIVE ({b.ViewerCount} watching)";
+        Text = $"Spectari - LIVE ({b.ViewerCount} watching)";
     }
 
     /// <summary>What's actually encoding right now, in GPU/CPU terms.</summary>
@@ -1740,7 +1740,7 @@ public sealed class MainForm : Form
         if (ActiveServerIsLocalOnly())
             AppendLog($"Warning: the server is bound to localhost only. This LAN link cannot work until Open port succeeds for port {port}.");
         else if (!LanAppliedForPort(port))
-            AppendLog($"Warning: StreamHost has no record of LAN access being opened for port {port}. This link may not load on other devices; if it does not, check Allow LAN and click Open port.");
+            AppendLog($"Warning: Spectari has no record of LAN access being opened for port {port}. This link may not load on other devices; if it does not, check Allow LAN and click Open port.");
     }
 
     private void OpenWatchWindow()
@@ -1798,14 +1798,14 @@ public sealed class MainForm : Form
             // read (or even probed): word the prompt for that instead of splicing
             // the sentinel into "reserved by another account: <owner>".
             string body = owner == Util.PortSetup.UnknownOwner
-                ? $"Port {port} is already reserved, but StreamHost could not read which account owns it.\n\n" +
+                ? $"Port {port} is already reserved, but Spectari could not read which account owns it.\n\n" +
                   "Replacing that reservation may break the app that created it. " +
-                  "Reserve this port for StreamHost anyway?"
+                  "Reserve this port for Spectari anyway?"
                 : $"Port {port} is already reserved by another account:\n\n{owner}\n\n" +
                   "Replacing that reservation may break the app that created it. " +
-                  "Reserve this port for StreamHost anyway?";
+                  "Reserve this port for Spectari anyway?";
             var choice = MessageBox.Show(this, body,
-                "StreamHost", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                "Spectari", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
             if (choice != DialogResult.Yes)
             {
                 AppendLog($"Kept the existing reservation for port {port}; pick a different port instead.");
@@ -1875,7 +1875,7 @@ public sealed class MainForm : Form
                     _fixPortButton.Enabled = true;
                     if (code == 0)
                     {
-                        // Record the scope that was actually applied — the pre-launch
+                        // Record the scope that was actually applied - the pre-launch
                         // snapshot, never the live checkbox, and only on success. Bind it
                         // to the exact port the helper configured (the snapshot `port`, not
                         // the current box), so a later port edit can't inherit this LAN grant.
@@ -1907,7 +1907,7 @@ public sealed class MainForm : Form
                         AppendLog($"Port setup failed (code {code}). Fallback: run setup.bat {port} as administrator.");
                 });
             }
-            catch { _fixingPort = false; } // form gone before we could report back — release the guard
+            catch { _fixingPort = false; } // form gone before we could report back - release the guard
         })
         { IsBackground = true, Name = "fix-port" }.Start();
     }
@@ -1946,7 +1946,7 @@ public sealed class MainForm : Form
                 return (tailnet, gpus, ffmpeg, gpu, gpuSource, expected);
             });
             var sb = new System.Text.StringBuilder();
-            sb.AppendLine($"StreamHost {AppVersion()}");
+            sb.AppendLine($"Spectari {AppVersion()}");
             sb.AppendLine($"Windows:  {Environment.OSVersion.VersionString}");
             sb.AppendLine($"GPUs:     {diagnostics.gpus}");
             sb.AppendLine($"ffmpeg:   {diagnostics.ffmpeg.version}");
@@ -1966,8 +1966,8 @@ public sealed class MainForm : Form
             string[] lines = ReadLogTail(200) ?? _logBox.Lines;
             foreach (string line in lines.Skip(Math.Max(0, lines.Length - 200)))
                 sb.AppendLine(line);
-            // Scrub the WHOLE blob in one place — keys, Tailscale IPs, and the
-            // username/paths across every line — right before it hits the
+            // Scrub the WHOLE blob in one place - keys, Tailscale IPs, and the
+            // username/paths across every line - right before it hits the
             // clipboard and, from there, a public issue. The live keys are passed
             // as exact secrets so a raw key without a ?k= wrapper is caught too.
             string scrubbed = Util.BundleScrubber.Scrub(sb.ToString(),
@@ -2022,7 +2022,7 @@ public sealed class MainForm : Form
 
             _availableUpdateVersion = canonical;
             int displayParts = remoteVersion.Revision != 0 ? 4 : remoteVersion.Build != 0 ? 3 : 2;
-            _updateLabel.Text = $"StreamHost v{remoteVersion.ToString(displayParts)} is available.";
+            _updateLabel.Text = $"Spectari v{remoteVersion.ToString(displayParts)} is available.";
             _updatePanel.Visible = true;
         }
         catch
@@ -2067,7 +2067,7 @@ public sealed class MainForm : Form
     /// <summary>Fatal-crash path only: stop a live session before the process
     /// exits, so ffmpeg tears down and the port releases instead of being killed
     /// mid-write. Stop() is bounded (a join with a timeout) so a wedged session
-    /// can't hang the exit. Guarded — a crash handler must never throw again.</summary>
+    /// can't hang the exit. Guarded - a crash handler must never throw again.</summary>
     internal void StopSessionForShutdown()
     {
         try { _session?.Stop(); } catch { }
@@ -2096,7 +2096,7 @@ public sealed class MainForm : Form
 
     /// <summary>Best-effort UMD driver version for a DXGI adapter, decoded from the
     /// packed CheckInterfaceSupport long (same layout as the capture init log).
-    /// Diagnostics only — never throws; returns "?" when unavailable.</summary>
+    /// Diagnostics only - never throws; returns "?" when unavailable.</summary>
     private static string AdapterDriver(Vortice.DXGI.IDXGIAdapter1 adapter)
     {
         try
@@ -2109,7 +2109,7 @@ public sealed class MainForm : Form
     }
 
     /// <summary>Identity of the first hardware adapter (vendor id, LUID, driver)
-    /// for the probe-cache fingerprint. Diagnostics only — never throws; returns
+    /// for the probe-cache fingerprint. Diagnostics only - never throws; returns
     /// zero/"?" placeholders when DXGI can't be read.</summary>
     private static (uint vendorId, string luid, string driver) PrimaryGpu()
     {
@@ -2132,7 +2132,7 @@ public sealed class MainForm : Form
 
     /// <summary>Genericizes remote peer HOSTNAMES in the tailnet line (friends'
     /// machine names) to peer1/peer2/... while keeping each direct/relay/idle path
-    /// token — the diagnostic value is the path mix, not the names. Status messages
+    /// token - the diagnostic value is the path mix, not the names. Status messages
     /// like "tailscale not running (state: ...)" have no name: path rows and pass
     /// through untouched. Applied here, not in DescribeTailnetPaths, so its other
     /// callers still see the real names.</summary>

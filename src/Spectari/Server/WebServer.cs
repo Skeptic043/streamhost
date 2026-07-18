@@ -9,7 +9,7 @@ namespace Spectari.Server;
 /// The viewer page and the WebSocket require the per-session key (?k=) when one
 /// is set; /api/stats and static assets stay open so the grid can probe.
 /// A null broadcaster runs the server in idle mode: pages are served ungated
-/// (they reveal nothing), /api/stats reports state "idle", and /ws refuses —
+/// (they reveal nothing), /api/stats reports state "idle", and /ws refuses -
 /// this is the holding page shown while the app is open but not streaming, so
 /// tabs opened early connect themselves once a stream starts.
 /// </summary>
@@ -45,7 +45,7 @@ public sealed class WebServer : IDisposable
 
         // A failed Start() poisons the HttpListener, so each attempt gets a fresh one.
         // The wildcard needs a urlacl (or admin); localhost always works for this
-        // user — so falling through to localhost means "no remote access yet",
+        // user - so falling through to localhost means "no remote access yet",
         // while failing BOTH means the port itself is taken by another process.
         (_listener, BoundPrefix) = TryBind($"http://+:{port}/") ?? TryBind($"http://localhost:{port}/")
             ?? throw new InvalidOperationException(DescribeBindFailure(port));

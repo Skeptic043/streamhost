@@ -1,18 +1,18 @@
-STREAMHOST
+SPECTARI
 ==========
 
 Stream a game or monitor to friends' browsers over a private network.
-Voice chat stays in your voice app; StreamHost only captures and sends
+Voice chat stays in your voice app; Spectari only captures and sends
 the audio of the application you select.
 
 SETUP (once, ~2 minutes)
 ------------------------
 1. Install Tailscale (tailscale.com/download) and accept the invite you
    received by email.
-2. Double-click StreamHost.exe and Start a stream. If a friend can't
+2. Double-click Spectari.exe and Start a stream. If a friend can't
    connect, click "Open port" in the app: it asks Windows for
    administrator approval once and configures the stream port for you
-   (the port is what StreamHost serves the stream on and what viewers'
+   (the port is what Spectari serves the stream on and what viewers'
    browsers connect to). You normally do this once for each port you use.
    If you'd rather do it up front, or "Open port" doesn't work for
    some reason, right-click setup.bat -> Run as administrator instead.
@@ -26,7 +26,7 @@ SETUP (once, ~2 minutes)
 
 STREAMING
 ---------
-1. Double-click StreamHost.exe.
+1. Double-click Spectari.exe.
 2. Pick your game from the list, pick a quality preset, Start streaming.
    The encoder dropdown shows Auto, CPU, and the hardware encoders detected
    on this PC; leave it on Auto unless you have a reason to force one.
@@ -44,7 +44,7 @@ STREAMING
    yet" and connects on its own once you start.
 
 Minimizing keeps the app on the taskbar and keeps streaming; closing the
-window stops your stream. If StreamHost is already running, launching it
+window stops your stream. If Spectari is already running, launching it
 again just brings that window back instead of opening a second copy. The
 app waits for the first captured frame before reporting the stream as
 live. If it stops with a capture error instead, use "Copy log" (it
@@ -74,7 +74,7 @@ TIPS
   captured window, any other running app, or nothing.
 - "Watch streams" in the app opens the built-in viewer (same grid as
   the browser version, identical playback for everyone), including a
-  "Find streams" panel that lists live streams from other StreamHost
+  "Find streams" panel that lists live streams from other Spectari
   machines on your Tailscale network for one-click adding.
 - Add &stats=1 to the end of a stream link for a diagnostics overlay
   (the link already ends in ?k=..., so it's & not ?).
@@ -103,7 +103,7 @@ and encoder info on the clipboard. Paste it when reporting a problem.
   viewers' browsers connect to isn't reachable yet. Click "Open port" again
   or run setup.bat.
 - "Port ... is already in use": another program (often another copy of
-  StreamHost still running) has that port. Close it, or set a different
+  Spectari still running) has that port. Close it, or set a different
   port in the app.
 - Everything looks fine on your end but nobody can connect: firewall
   state can drift (a Windows reset, another program, a network profile

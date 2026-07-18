@@ -19,7 +19,7 @@ public static class WindowEnumerator
     private static readonly object SizeCacheLock = new();
     private static readonly Dictionary<WindowIdentity, WindowSize> SizeCache = [];
 
-    /// <summary>Visible, titled, non-cloaked top-level windows — the capturable set.</summary>
+    /// <summary>Visible, titled, non-cloaked top-level windows - the capturable set.</summary>
     public static List<WindowDescription> GetWindows()
     {
         lock (SizeCacheLock)

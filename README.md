@@ -1,13 +1,13 @@
-# StreamHost
+# Spectari
 
-StreamHost streams a monitor or a single window from a Windows PC over
+Spectari streams a monitor or a single window from a Windows PC over
 Tailscale or LAN to a modern browser or the built-in Watch window. It was
 built for private streaming in a small group: you run one exe, people you
 choose open a link, and you're done. Transport is WebSocket and playback is
-MSE, with no WebRTC, signaling server, StreamHost account, or cloud relay.
+MSE, with no WebRTC, signaling server, Spectari account, or cloud relay.
 
 Once network access is in place, viewers can watch in a modern browser or
-through the StreamHost Watch window.
+through the Spectari Watch window.
 
 ## What it does
 
@@ -26,7 +26,7 @@ through the StreamHost Watch window.
   guessed link does not work. The Security section explains this further.
 - A grid page tiles several streams in one tab, and the built-in Watch
   window shows the same grid without a browser. It automatically searches
-  for live StreamHost machines it can discover on your Tailscale network.
+  for live Spectari machines it can discover on your Tailscale network.
 - While the app is open but not streaming, the link serves a "not streaming
   yet" page that connects on its own when you start. The Watch window checks
   your tailnet in the background and plays one soft chime when a stream you
@@ -42,7 +42,7 @@ through the StreamHost Watch window.
 ## Quick start
 
 1. Download the latest release zip from the Releases page, unzip it into a
-   folder anywhere, and run StreamHost.exe.
+   folder anywhere, and run Spectari.exe.
 2. Pick what to share and a quality preset, click Start streaming.
 3. Click Copy link and send it to whoever is watching. For someone who is
    only on your LAN, use the small arrow next to it and choose Copy LAN link.
@@ -60,7 +60,7 @@ a shared-machine invite should use the fresh link you send.
 
 ## Watching over the internet: Tailscale
 
-StreamHost does not expose anything to the public internet, and there is no
+Spectari does not expose anything to the public internet, and there is no
 relay server. Instead it runs over [Tailscale](https://tailscale.com), a
 free mesh VPN that makes your PCs reach each other directly, encrypted,
 with no port forwarding.
@@ -90,7 +90,7 @@ currently labels machine sharing as beta.
    invite it gives you to the viewer privately.
 3. The viewer accepts the invite. Your PC now shows up in their Tailscale
    as a shared machine.
-4. You send them the stream link. If they have StreamHost installed, opening
+4. You send them the stream link. If they have Spectari installed, opening
    Watch automatically searches for reachable live streams, so a discoverable
    host appears there without pasting its link.
 
@@ -146,7 +146,7 @@ The model in plain terms, so you can decide whether it fits your use:
   reachability is the real gate: anyone you let onto your tailnet, or share
   your PC with, can watch. The key mainly protects against stale links and
   casual access from an allowed LAN.
-- **Tailscale is recognized by address range.** StreamHost treats the
+- **Tailscale is recognized by address range.** Spectari treats the
   100.64.0.0/10 range as Tailscale. Tailscale uses that range, but does
   not own it exclusively; another VPN or a carrier-grade NAT setup that
   puts addresses from it on your machine would receive the same trust.
@@ -192,11 +192,11 @@ The model in plain terms, so you can decide whether it fits your use:
 
 **Is it free?** Yes, for noncommercial use. See the license note below.
 
-**Why not just use Discord screen share?** Quality and control. StreamHost
+**Why not just use Discord screen share?** Quality and control. Spectari
 gives you direct bitrate and quality controls without requiring a
 subscription, and viewers can fullscreen a plain browser tab on any monitor.
 
-**Does it include my microphone or voice chat?** StreamHost does not capture
+**Does it include my microphone or voice chat?** Spectari does not capture
 your microphone. Audio comes from the one app you pick in the Audio dropdown.
 Any other app you did not pick, including Discord, is excluded.
 
@@ -213,7 +213,7 @@ stream to four viewers needs roughly 48 Mbps of upload. Check your upload
 speed specifically, it is usually a small fraction of your download. On a
 typical cable connection the realistic ceiling is around 3 to 5 viewers;
 symmetric fiber can feed 10 or more, and lower bitrates stretch further.
-StreamHost is built for a handful of friends, not an audience.
+Spectari is built for a handful of friends, not an audience.
 
 **What's the latency?** Roughly half a second to a second, tuned for
 smoothness over speed.
@@ -224,21 +224,21 @@ requires the per-stream key from the link. Nothing is reachable from the
 public internet. The Security section above has the full model.
 
 **Can I run it from the command line?** Yes, any argument switches to
-console mode: `StreamHost.exe --monitor 0 --encoder libx264 --port 8093`.
+console mode: `Spectari.exe --monitor 0 --encoder libx264 --port 8093`.
 
 ## Build from source
 
 Needs the .NET 10 SDK. From the repo root:
 
-    dotnet run --project src/StreamHost
+    dotnet run --project src/Spectari
 
 ## Support
 
-StreamHost is a hobby project. If it's useful to you and you feel like
+Spectari is a hobby project. If it's useful to you and you feel like
 saying thanks: [ko-fi.com/skeptic043](https://ko-fi.com/skeptic043).
 
 ## License
 
-StreamHost is free for personal and other noncommercial use under
+Spectari is free for personal and other noncommercial use under
 [PolyForm Noncommercial 1.0.0](LICENSE). Commercial use is not included.
 Contact the maintainer through GitHub regarding commercial licensing.

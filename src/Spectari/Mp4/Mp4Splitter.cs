@@ -7,7 +7,7 @@ namespace Spectari.Mp4;
 /// <summary>
 /// Consumes ffmpeg's fragmented-MP4 byte stream, splits it into the init segment
 /// (ftyp+moov) and per-frame fragments (moof+mdat), detects keyframe fragments,
-/// and extracts the RFC 6381 codec string from avcC — everything MSE needs.
+/// and extracts the RFC 6381 codec string from avcC - everything MSE needs.
 /// </summary>
 public static class Mp4Splitter
 {
@@ -54,7 +54,7 @@ public static class Mp4Splitter
                     pendingMoof = null;
                     break;
                 default:
-                    break; // styp/sidx/mfra etc. — irrelevant for live MSE
+                    break; // styp/sidx/mfra etc. - irrelevant for live MSE
             }
         }
     }
@@ -97,7 +97,7 @@ public static class Mp4Splitter
     }
 
     /// <summary>True when the fragment's first VIDEO sample is a sync sample (IDR).
-    /// With audio muxed in, a moof carries one traf per track — we must check the
+    /// With audio muxed in, a moof carries one traf per track - we must check the
     /// video track's traf (audio samples are all "sync" and would fake keyframes).</summary>
     private static bool MoofStartsWithSyncSample(byte[] moof, uint videoTrackId)
     {

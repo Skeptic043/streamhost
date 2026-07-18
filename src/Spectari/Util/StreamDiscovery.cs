@@ -5,7 +5,7 @@ namespace Spectari.Util;
 public sealed record DiscoveredStream(string PeerName, string Url, string StreamName, int Viewers, bool IsLocal);
 
 /// <summary>
-/// Finds live StreamHost streams on the tailnet: asks the Tailscale CLI for
+/// Finds live Spectari streams on the tailnet: asks the Tailscale CLI for
 /// peers ("tailscale status --json"), probes each one's /api/stats, and keeps a
 /// small remembered-endpoints file as a fallback for peers the CLI misses
 /// (e.g. custom ports seen before). Hosts hand their current view key to
@@ -101,7 +101,7 @@ public static class StreamDiscovery
 
     /// <summary>IPv4 + hostname of every online tailnet peer, this machine included
     /// (your own stream showing up in the finder is correct). Empty when the
-    /// Tailscale CLI is missing or errors — remembered endpoints still get probed.</summary>
+    /// Tailscale CLI is missing or errors - remembered endpoints still get probed.</summary>
     private static List<(string Ip, string Name, bool IsLocal)> GetTailnetPeers()
     {
         string? json = RunTailscale("status --json");
@@ -131,7 +131,7 @@ public static class StreamDiscovery
     }
 
     /// <summary>One line: each online peer and whether traffic to it goes direct
-    /// or through a DERP relay — the first thing to check when a viewer stutters.
+    /// or through a DERP relay - the first thing to check when a viewer stutters.
     /// Endpoint addresses are deliberately omitted (support bundles get pasted
     /// around). "idle" means no recent traffic, so the path is undecided.</summary>
     public static string DescribeTailnetPaths()
@@ -180,7 +180,7 @@ public static class StreamDiscovery
         {
             try
             {
-                // Drains both pipes and can't block past 5s — a tailscale that
+                // Drains both pipes and can't block past 5s - a tailscale that
                 // hangs without closing stdout no longer wedges Find Streams.
                 var r = ProcessRunner.Run(exe, args, 5000);
                 if (!r.TimedOut && r.ExitCode == 0 && r.StdOut.Length > 0) return r.StdOut;

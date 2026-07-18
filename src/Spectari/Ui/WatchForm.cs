@@ -54,7 +54,7 @@ public sealed class WatchForm : Form
     public WatchForm(int extraPort = 8093)
     {
         _extraPort = extraPort;
-        Text = "StreamHost - Watch";
+        Text = "Spectari - Watch";
         Size = new Size(1200, 750);
         MinimumSize = new Size(640, 400);
         StartPosition = FormStartPosition.CenterScreen;
@@ -109,7 +109,7 @@ public sealed class WatchForm : Form
             await _web.EnsureCoreWebView2Async(env);
             if (_closeCts.IsCancellationRequested || IsDisposed || Disposing) return;
             _web.CoreWebView2.SetVirtualHostNameToFolderMapping(
-                "streamhost.local", Path.Combine(AppContext.BaseDirectory, "wwwroot"),
+                "spectari.local", Path.Combine(AppContext.BaseDirectory, "wwwroot"),
                 CoreWebView2HostResourceAccessKind.Allow);
             _web.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
             // An HTML element going fullscreen only fills the WebView2 control, so
@@ -156,7 +156,7 @@ public sealed class WatchForm : Form
                     _discoveryTimer.Start();
                 }
             };
-            _web.CoreWebView2.Navigate("http://streamhost.local/grid.html");
+            _web.CoreWebView2.Navigate("http://spectari.local/grid.html");
         }
         catch (Exception ex)
         {
@@ -198,7 +198,7 @@ public sealed class WatchForm : Form
 
     /// <summary>Probes tailnet peers (plus remembered endpoints) and pushes the
     /// results into the grid page's Find-streams row. Clicking a result there
-    /// adds the stream to the existing grid — never a new window.</summary>
+    /// adds the stream to the existing grid - never a new window.</summary>
     private async Task FindStreamsAsync(bool automatic)
     {
         if (_finding || !_webReady || IsDisposed || Disposing || _closeCts.IsCancellationRequested) return;

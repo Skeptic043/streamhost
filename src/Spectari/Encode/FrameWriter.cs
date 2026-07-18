@@ -44,7 +44,7 @@ public sealed class FrameWriter : IDisposable
         _thread.Start();
     }
 
-    /// <summary>Blocks when the encoder is behind — that back-pressure is intentional.</summary>
+    /// <summary>Blocks when the encoder is behind - that back-pressure is intentional.</summary>
     public byte[] RentBuffer(CancellationToken ct) => _free.Take(ct);
 
     public void Enqueue(byte[] buffer)

@@ -9,7 +9,7 @@ namespace Spectari.Util;
 /// username collapse to env tokens, and remote peer hostnames are genericized
 /// by the caller before the text arrives here. Deliberately KEEPS the shared
 /// window title, local machine/stream name, OS version, GPU names, ffmpeg
-/// version, and settings values — those are the diagnostic payload, not PII.
+/// version, and settings values - those are the diagnostic payload, not PII.
 /// </summary>
 public static class BundleScrubber
 {
@@ -60,7 +60,7 @@ public static class BundleScrubber
         {
             string s = text;
 
-            // 1) Exact live secrets first — catches a raw key that appears without
+            // 1) Exact live secrets first - catches a raw key that appears without
             // the ?k= wrapper. Longest first so a key that is a prefix of another
             // can't leave a tail behind; empties skipped so we never replace "".
             if (extraSecrets is not null)

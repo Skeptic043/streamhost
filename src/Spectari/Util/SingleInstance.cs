@@ -3,8 +3,8 @@ using System.Runtime.InteropServices;
 namespace Spectari.Util;
 
 /// <summary>
-/// One GUI instance per user session. A second launch pings the first — which
-/// restores and focuses its window — then exits, so a user who lost track of
+/// One GUI instance per user session. A second launch pings the first - which
+/// restores and focuses its window - then exits, so a user who lost track of
 /// the window (minimized, buried behind a game) gets the existing one back
 /// instead of starting a rival process that collides on the stream port.
 /// Console mode (any CLI arg) is unaffected: several console streams on
@@ -19,7 +19,7 @@ public static class SingleInstance
     public static readonly int ShowMessage = RegisterWindowMessage("Spectari.Show.9C2F1A");
 
     /// <summary>True if we are the first instance (and now hold the lock). False
-    /// if one was already running — it has been pinged to surface its window.</summary>
+    /// if one was already running - it has been pinged to surface its window.</summary>
     public static bool TryAcquire()
     {
         try
@@ -30,7 +30,7 @@ public static class SingleInstance
         }
         catch
         {
-            // If the lock can't be created, fail open — better a possible second
+            // If the lock can't be created, fail open - better a possible second
             // instance than refusing to launch at all.
             return true;
         }

@@ -1,4 +1,4 @@
-# Builds the shippable StreamHost zip: self-contained exe (no .NET install
+# Builds the shippable Spectari zip: self-contained exe (no .NET install
 # needed) + bundled ffmpeg + setup/start scripts + README.
 param([string]$Version)
 
@@ -12,23 +12,23 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
 $commit = (git rev-parse --short HEAD).Trim()
 
 Write-Host "Cleaning previous output..."
-if (Test-Path dist/StreamHost) { Remove-Item dist/StreamHost -Recurse -Force }
+if (Test-Path dist/Spectari) { Remove-Item dist/Spectari -Recurse -Force }
 
 Write-Host "Publishing self-contained exe..."
-dotnet publish src/StreamHost -c Release -r win-x64 --self-contained `
+dotnet publish src/Spectari -c Release -r win-x64 --self-contained `
     -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
     -p:Version=$Version -p:SourceRevisionId=$commit `
-    -o dist/StreamHost | Out-Null
+    -o dist/Spectari | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "publish failed" }
 
 Write-Host "Bundling ffmpeg..."
 $ffmpeg = (Get-Command ffmpeg -ErrorAction Stop).Source
-Copy-Item $ffmpeg dist/StreamHost/ffmpeg.exe -Force
+Copy-Item $ffmpeg dist/Spectari/ffmpeg.exe -Force
 
 Write-Host "Recording build info..."
-$ffmpegVersionLine = (& dist/StreamHost/ffmpeg.exe -version | Select-Object -First 1)
+$ffmpegVersionLine = (& dist/Spectari/ffmpeg.exe -version | Select-Object -First 1)
 $ffmpegBuildconf = ""
-$ffmpegBuildconfLine = (& dist/StreamHost/ffmpeg.exe -version | Select-String -SimpleMatch 'configuration:' | Select-Object -First 1)
+$ffmpegBuildconfLine = (& dist/Spectari/ffmpeg.exe -version | Select-String -SimpleMatch 'configuration:' | Select-Object -First 1)
 if ($ffmpegBuildconfLine) { $ffmpegBuildconf = $ffmpegBuildconfLine.ToString().Trim() }
 if ([string]::IsNullOrWhiteSpace($ffmpegBuildconf)) {
     throw "Could not read the ffmpeg build configuration; refusing to guess its license."
@@ -49,7 +49,7 @@ $requiredCapabilities = @{
     '-protocols' = @('pipe')
 }
 foreach ($query in $requiredCapabilities.Keys) {
-    $listing = (& dist/StreamHost/ffmpeg.exe -hide_banner $query 2>&1 | Out-String)
+    $listing = (& dist/Spectari/ffmpeg.exe -hide_banner $query 2>&1 | Out-String)
     if ($LASTEXITCODE -ne 0) { throw "ffmpeg $query failed; refusing to package an unverified build." }
     foreach ($capability in $requiredCapabilities[$query]) {
         $pattern = "(?m)^\s*(?:[A-Z.]{1,8}\s+)?$([regex]::Escape($capability))(?:\s|$)"
@@ -59,10 +59,10 @@ foreach ($query in $requiredCapabilities.Keys) {
     }
 }
 
-$ffmpegHash = (Get-FileHash dist/StreamHost/ffmpeg.exe -Algorithm SHA256).Hash
+$ffmpegHash = (Get-FileHash dist/Spectari/ffmpeg.exe -Algorithm SHA256).Hash
 $buildDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss 'UTC'")
 $buildInfo = @(
-    "StreamHost version: $Version"
+    "Spectari version: $Version"
     "Git commit: $commit"
     "Build date: $buildDate"
     "ffmpeg version: $ffmpegVersionLine"
@@ -71,14 +71,14 @@ $buildInfo = @(
 if (-not [string]::IsNullOrWhiteSpace($ffmpegBuildconf)) {
     $buildInfo += "ffmpeg buildconf: $ffmpegBuildconf"
 }
-Set-Content -Path dist/StreamHost/build-info.txt -Value $buildInfo
+Set-Content -Path dist/Spectari/build-info.txt -Value $buildInfo
 
 Write-Host "Adding scripts + README..."
-Copy-Item packaging/setup.bat, packaging/start-stream.bat, packaging/README.txt dist/StreamHost/ -Force
+Copy-Item packaging/setup.bat, packaging/start-stream.bat, packaging/README.txt dist/Spectari/ -Force
 
 Write-Host "Adding license + third-party notices..."
-# StreamHost's own license, .txt so double-click opens it in Notepad.
-Copy-Item LICENSE dist/StreamHost/LICENSE.txt -Force
+# Spectari's own license, .txt so double-click opens it in Notepad.
+Copy-Item LICENSE dist/Spectari/LICENSE.txt -Force
 
 # Generated at package time so it describes the actual bundled ffmpeg.exe.
 # Derive ffmpeg's license from its build configuration (validated above).
@@ -98,9 +98,9 @@ if ($ffmpegBuildconf -match '(?:^|\s)--enable-gpl(?:\s|$)') {
 }
 
 $notice = @(
-    "StreamHost third-party notices"
+    "Spectari third-party notices"
     ""
-    "StreamHost bundles FFmpeg as ffmpeg.exe. FFmpeg is a separate project with"
+    "Spectari bundles FFmpeg as ffmpeg.exe. FFmpeg is a separate project with"
     "its own authors and license, listed below."
     ""
     "ffmpeg version: $ffmpegVersionLine"
@@ -117,16 +117,16 @@ $notice += "FFmpeg project: https://ffmpeg.org"
 $notice += "FFmpeg source: https://ffmpeg.org/download.html"
 $notice += "FFmpeg license details: https://ffmpeg.org/legal.html"
 $notice += ""
-$notice += "StreamHost itself is licensed separately under the PolyForm Noncommercial License. See LICENSE.txt."
-Set-Content -Path dist/StreamHost/THIRD-PARTY-NOTICES.txt -Value $notice
+$notice += "Spectari itself is licensed separately under the PolyForm Noncommercial License. See LICENSE.txt."
+Set-Content -Path dist/Spectari/THIRD-PARTY-NOTICES.txt -Value $notice
 
 # Publish drops debug symbols we don't need to ship
-Remove-Item dist/StreamHost/*.pdb -ErrorAction SilentlyContinue
+Remove-Item dist/Spectari/*.pdb -ErrorAction SilentlyContinue
 
-$zip = "dist/StreamHost-v$Version.zip"
+$zip = "dist/Spectari-v$Version.zip"
 Write-Host "Zipping -> $zip"
 if (Test-Path $zip) { Remove-Item $zip }
-Compress-Archive -Path dist/StreamHost/* -DestinationPath $zip
+Compress-Archive -Path dist/Spectari/* -DestinationPath $zip
 
 $size = [math]::Round((Get-Item $zip).Length / 1MB, 1)
 Write-Host "Done: $zip ($size MB)"

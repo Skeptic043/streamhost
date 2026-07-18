@@ -282,7 +282,7 @@ internal sealed class StallTeardownCoordinator
     {
         Console.Error.WriteLine($"[shutdown] stalled-session salvage failed: {failure}; active stages at deadline: {stages}.");
         Console.Error.WriteLine(
-            "[shutdown] closing StreamHost to prevent invisible or orphaned server or ffmpeg work. Reopen it and use Copy log for the stage diagnostics.");
+            "[shutdown] closing Spectari to prevent invisible or orphaned server or ffmpeg work. Reopen it and use Copy log for the stage diagnostics.");
         Environment.Exit(1);
     }
 

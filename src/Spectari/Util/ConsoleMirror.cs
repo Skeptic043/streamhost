@@ -23,7 +23,7 @@ public static class ConsoleMirror
                 foreach (var old in new DirectoryInfo(logDir).GetFiles("*.log")
                              .OrderByDescending(f => f.CreationTimeUtc).Skip(9))
                     try { old.Delete(); } catch { }
-                LogFilePath = Path.Combine(logDir, $"streamhost-{DateTime.Now:yyyyMMdd-HHmmss}.log");
+                LogFilePath = Path.Combine(logDir, $"spectari-{DateTime.Now:yyyyMMdd-HHmmss}.log");
                 _logFile = new StreamWriter(LogFilePath, append: false, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true)) { AutoFlush = true };
             }
             catch { _logFile = null; }

@@ -28,7 +28,7 @@ internal sealed class UiHangWatchdog : IDisposable
         _thread = new Thread(Run)
         {
             IsBackground = true,
-            Name = "StreamHost UI hang watchdog",
+            Name = "Spectari UI hang watchdog",
         };
         _thread.Start();
     }

@@ -143,7 +143,7 @@ let stat = { delay: 0, bytes: 0, bytesWindowStart: performance.now(), kbps: 0,
              droppedLast: 0, totalLast: 0, dropWindow: "–",
              sourceFps: "–", dupPct: "–" };
 
-// Host-side capture stats (source fps / dup %) — polled while the overlay is open.
+// Host-side capture stats (source fps / dup %) - polled while the overlay is open.
 setInterval(() => {
   if (!statsEl.classList.contains("show")) return;
   fetch("/api/stats").then(r => r.json()).then(s => {
@@ -158,7 +158,7 @@ if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) {
 }
 
 // Page compositor rate (rAF ticks/sec). If this reads ~25-30 instead of your
-// monitor's refresh rate, the browser is compositing in software — a browser
+// monitor's refresh rate, the browser is compositing in software - a browser
 // settings problem (hardware acceleration), not a stream problem.
 const raf = { count: 0, last: 0, fps: 0 };
 (function rafLoop() { raf.count++; requestAnimationFrame(rafLoop); })();
@@ -254,7 +254,7 @@ function setupMediaSource() {
 
 function pump() {
   if (!sb || sb.updating || queue.length === 0) return;
-  // Coalesce everything pending into ONE appendBuffer call — Firefox's media
+  // Coalesce everything pending into ONE appendBuffer call - Firefox's media
   // pipeline can't keep up with 60 tiny appends/sec (presents ~25fps), while
   // fewer, larger appends play at full rate.
   let chunk;
@@ -292,7 +292,7 @@ function cleanup() {
 }
 
 // Latency governor + housekeeping. Hysteresis: we only speed up when the lag
-// has been high for 1.5s straight, and only by 3% — invisible to the eye.
+// has been high for 1.5s straight, and only by 3% - invisible to the eye.
 setInterval(() => {
   if (!video.buffered.length) return;
   const end = video.buffered.end(video.buffered.length - 1);

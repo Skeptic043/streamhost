@@ -52,7 +52,7 @@ public sealed class FfmpegEncoder : IDisposable
         // catch up. A stalled audio feed therefore froze the entire fragment
         // output (indistinguishable from an encoder stall). Half a second keeps
         // interleaving tight in the healthy case and force-flushes video-only
-        // fragments when audio starves — a degraded stream instead of no stream.
+        // fragments when audio starves - a degraded stream instead of no stream.
         string args =
             $"-hide_banner -loglevel warning " +
             $"-thread_queue_size 128 -f rawvideo -pixel_format bgra -video_size {inWidth}x{inHeight} -framerate {fps} -i pipe:0 " +
@@ -95,7 +95,7 @@ public sealed class FfmpegEncoder : IDisposable
     /// so a probe pass is meaningful for the config that actually runs (the v0.9-v0.10
     /// AMD miss: the probe passed on default options while the live encode stalled on
     /// its low-latency ones). AMF deliberately has NO -usage lowlatency: that
-    /// submission path wedges on some driver/hardware combos (RX 9070 XT field case —
+    /// submission path wedges on some driver/hardware combos (RX 9070 XT field case -
     /// header written, then zero output) while the default transcoding usage is the
     /// path every driver release actually gets tested on. With -bf 0 and a 0.5 s GOP
     /// the latency difference is tens of milliseconds; robustness wins.</summary>
@@ -141,7 +141,7 @@ public sealed class FfmpegEncoder : IDisposable
     }
 
     /// <summary>Single source of truth for the positive-probe cache file
-    /// (%AppData%/StreamHost/encoder.cache), shared by PickEncoder and
+    /// (%AppData%/Spectari/encoder.cache), shared by PickEncoder and
     /// InvalidateProbeCache so the path is never spelled out in two places.</summary>
     private static string CachePath => Spectari.Util.AppPaths.EncoderCacheFile;
 
@@ -175,7 +175,7 @@ public sealed class FfmpegEncoder : IDisposable
         if (preferred == "libx264") return preferred;
 
         // Cache a PASSED probe per GPU so startup skips the 1-2s self-test.
-        // Failures are deliberately not cached — a driver hiccup shouldn't
+        // Failures are deliberately not cached - a driver hiccup shouldn't
         // condemn the machine to CPU encoding forever.
         string cachePath = CachePath;
         string? token = ExpectedProbeToken(gpuVendorId, adapterLuid, driverVersion);
@@ -378,7 +378,7 @@ public sealed class FfmpegEncoder : IDisposable
     /// options as a live stream. A hardware encoder that can't sustain this config
     /// (some AMD AMF driver combos write the header then stall) fails or hangs here,
     /// so we catch it before it dead-ends a live stream. Probing a different config
-    /// than we run proved worthless in the field — the v0.9 probe passed on defaults
+    /// than we run proved worthless in the field - the v0.9 probe passed on defaults
     /// while the real low-latency options stalled.</summary>
     private static bool ProbeEncoder(string encoder)
     {
@@ -402,7 +402,7 @@ public sealed class FfmpegEncoder : IDisposable
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[encoder] could not run ffmpeg ({ex.Message}); is ffmpeg.exe next to StreamHost.exe?");
+            Console.Error.WriteLine($"[encoder] could not run ffmpeg ({ex.Message}); is ffmpeg.exe next to Spectari.exe?");
             return false;
         }
     }

@@ -14,7 +14,7 @@ public interface ICaptureSource : IDisposable
     string AdapterLuid { get; }
     string DriverVersion { get; }
 
-    /// <summary>Monotonic frame counter — compare across calls to detect fresh content.</summary>
+    /// <summary>Monotonic frame counter - compare across calls to detect fresh content.</summary>
     long FrameVersion { get; }
     long FramesArrived { get; }
 

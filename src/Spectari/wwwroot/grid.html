@@ -30,7 +30,7 @@
   header .ghost { background: #1d2026; border: 1px solid #2e333b; color: #9aa1ab; }
   header .ghost:hover { background: #242830; color: #e6e8eb; }
   /* Second header row: tailnet discovery. Only shown inside the app's Watch
-     window — the probing runs natively (tailscale CLI), results are pushed in. */
+     window - the probing runs natively (tailscale CLI), results are pushed in. */
   #finder { flex-basis: 100%; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
   /* Restore pill shown while the bar is hidden. Top-center: matches where the
      bar lives; the tile corners still belong to the streams' own controls.
@@ -98,7 +98,25 @@
 const grid = document.getElementById("grid");
 const empty = document.getElementById("empty");
 const urlInput = document.getElementById("urlInput");
-const KEY = "streamhost_grid_urls";
+const KEY = "spectari_grid_urls";
+const LAYOUT_KEY = "spectari_grid_layout";
+const HIDEBAR_KEY = "spectari_grid_hidebar";
+
+// Keep settings for same-origin browser viewers after the storage-key rename.
+// Each old value is copied once only when its replacement is still absent.
+const LEGACY_KEY_PREFIX = "stream" + "host_grid_";
+const STORAGE_KEY_MIGRATIONS = [
+  [LEGACY_KEY_PREFIX + "urls", KEY],
+  [LEGACY_KEY_PREFIX + "layout", LAYOUT_KEY],
+  [LEGACY_KEY_PREFIX + "hidebar", HIDEBAR_KEY],
+];
+for (const [oldKey, newKey] of STORAGE_KEY_MIGRATIONS) {
+  try {
+    if (localStorage.getItem(newKey) !== null) continue;
+    const value = localStorage.getItem(oldKey);
+    if (value !== null) localStorage.setItem(newKey, value);
+  } catch (_) { /* storage unavailable: use defaults */ }
+}
 
 function load() { try { return JSON.parse(localStorage.getItem(KEY)) || []; } catch { return []; } }
 function save(urls) { localStorage.setItem(KEY, JSON.stringify(urls)); }
@@ -145,7 +163,7 @@ function normalize(u) {
   u = u.trim();
   if (!u) return null;
   if (!/^https?:\/\//i.test(u)) u = "http://" + u;
-  // Keep the viewer key (?k=) — the stream is unwatchable without it.
+  // Keep the viewer key (?k=) - the stream is unwatchable without it.
   try {
     const parsed = new URL(u);
     const k = parsed.searchParams.get("k");
@@ -194,8 +212,8 @@ function createTile(url) {
   remove.onclick = () => removeTile(tile);
   bar.appendChild(remove);
 
-  // The iframe is NOT embedded here — pollTile() adds it only once the
-  // endpoint validates as a StreamHost. Until then the tile shows just its bar.
+  // The iframe is NOT embedded here - pollTile() adds it only once the
+  // endpoint validates as a Spectari. Until then the tile shows just its bar.
   tile.appendChild(bar);
   return tile;
 }
@@ -235,7 +253,6 @@ function fixSpans() {
 window.addEventListener("resize", fixSpans);
 
 // Layout: side-by-side auto-fit (default) or one column stacked vertically.
-const LAYOUT_KEY = "streamhost_grid_layout";
 const layoutBtn = document.getElementById("layoutBtn");
 function stacked() { return localStorage.getItem(LAYOUT_KEY) === "stack"; }
 function applyLayout() {
@@ -290,10 +307,10 @@ window.addStream = function (u) {
   return true;
 };
 
-// Embed a tile's player iframe once its host has validated as a StreamHost.
+// Embed a tile's player iframe once its host has validated as a Spectari.
 // Sandboxed to allow-scripts (MSE playback JS) + allow-same-origin (its WebSocket
 // to /ws and fetch to /api/stats must stay same-origin to the remote host);
-// every other capability — top-navigation, popups, downloads, form submits — is
+// every other capability - top-navigation, popups, downloads, form submits - is
 // withheld by leaving the rest of the sandbox tokens off.
 function embed(tile) {
   if (tile.querySelector("iframe")) return;
@@ -322,9 +339,9 @@ function pollTile(tile) {
     .then(s => {
       if (!tileIsCurrent(tile, url, generation)) return;
       // "Responded" is not "live", and a bare 200 from some other server on
-      // this port is not a StreamHost at all — require the host's own state
+      // this port is not a Spectari at all - require the host's own state
       // field before trusting the endpoint enough to embed it.
-      if (typeof s.state !== "string") throw new Error("not a streamhost");
+      if (typeof s.state !== "string") throw new Error("not a spectari");
       const live = s.state === "live";
       tile.classList.toggle("live", live);
       tile.querySelector(".name").textContent = s.name || url;
@@ -341,8 +358,8 @@ function pollTile(tile) {
       }
       // Validated (live OR the idle holding page, which is meant to embed):
       // add the iframe if it isn't there yet. This is both the first-embed
-      // path and the recovery path for a host that was unreachable — its tile
-      // carried no iframe — and has come back. A fresh embed is clean, so
+      // path and the recovery path for a host that was unreachable - its tile
+      // carried no iframe - and has come back. A fresh embed is clean, so
       // clear the missed-poll counter that would otherwise force a reload.
       if (!tile.querySelector("iframe")) {
         embed(tile);
@@ -393,7 +410,6 @@ function move(tile, dir) {
 
 // The add-stream bar can be tucked away while watching; the faint chip
 // top-right brings it back. Remembered per browser like the stream list.
-const HIDEBAR_KEY = "streamhost_grid_hidebar";
 const headerEl = document.querySelector("header");
 const showBar = document.getElementById("showBar");
 function applyBarVisibility() {

@@ -4,7 +4,7 @@ namespace Spectari.Util;
 
 /// <summary>
 /// One kill-on-close job object for all child processes. Windows closes the
-/// job handle when StreamHost dies — cleanly, by crash, or by Task Manager —
+/// job handle when Spectari dies - cleanly, by crash, or by Task Manager -
 /// and kills every adopted child with it, so a force-quit can never leave an
 /// orphaned ffmpeg behind holding pipes or confusing the next launch.
 /// </summary>
@@ -16,7 +16,7 @@ public static class ChildJob
     /// <summary>Best effort: a process that can't be adopted still runs. When the
     /// job couldn't be created, or a process refuses to join it (already in a job
     /// that forbids nesting), the "a force-quit can never orphan ffmpeg" guarantee
-    /// does not hold for this run — say so once so the log is honest.</summary>
+    /// does not hold for this run - say so once so the log is honest.</summary>
     public static void Adopt(System.Diagnostics.Process process)
     {
         try
