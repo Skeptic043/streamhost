@@ -74,12 +74,12 @@ public sealed class WebServer : IDisposable
     }
 
     /// <summary>Turns a total bind failure into an actionable message: name the
-    /// likely culprit (another StreamHost answers /api/stats) so the user closes
+    /// likely culprit (another Spectari answers /api/stats) so the user closes
     /// the right thing instead of force-quitting blindly.</summary>
     private static string DescribeBindFailure(int port)
     {
         string culprit = ProbedAnotherSpectari(port)
-            ? "another StreamHost is already running on this port (check the taskbar or Task Manager and close it, or pick a different port)"
+            ? "another Spectari is already running on this port (check the taskbar or Task Manager and close it, or pick a different port)"
             : "another program is using this port; close it or pick a different port";
         return $"Port {port} is already in use: {culprit}.";
     }

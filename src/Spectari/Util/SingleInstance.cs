@@ -16,7 +16,7 @@ public static class SingleInstance
 
     /// <summary>System-wide message id (same string → same id in every process),
     /// broadcast by a late launch and caught by the running window's WndProc.</summary>
-    public static readonly int ShowMessage = RegisterWindowMessage("StreamHost.Show.9C2F1A");
+    public static readonly int ShowMessage = RegisterWindowMessage("Spectari.Show.9C2F1A");
 
     /// <summary>True if we are the first instance (and now hold the lock). False
     /// if one was already running — it has been pinged to surface its window.</summary>
@@ -25,7 +25,7 @@ public static class SingleInstance
         try
         {
             // Local\ = per session, so two logged-in users don't block each other.
-            _mutex = new Mutex(initiallyOwned: true, @"Local\StreamHost.SingleInstance", out bool createdNew);
+            _mutex = new Mutex(initiallyOwned: true, @"Local\Spectari.SingleInstance", out bool createdNew);
             if (createdNew) return true;
         }
         catch
