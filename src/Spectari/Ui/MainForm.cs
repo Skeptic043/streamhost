@@ -1109,8 +1109,8 @@ public sealed class MainForm : Form
         _lifecycleGen++;
     }
 
-    /// <summary>Guided switch: a small popup with just the source, preset, and
-    /// audio pickers, prefilled from the current selections. OK writes the
+    /// <summary>Guided switch: a small popup with the source, preset, bitrate,
+    /// encoder, and audio pickers, prefilled from the current selections. OK writes the
     /// choices back to the main controls and goes through the normal switch
     /// (or plain start when idle), so both paths stay one code path.</summary>
     private void ShowSwitchDialog()
@@ -1140,7 +1140,7 @@ public sealed class MainForm : Form
             MaximizeBox = false,
             ShowInTaskbar = false,
             StartPosition = FormStartPosition.CenterParent,
-            ClientSize = new Size(480, 244),
+            ClientSize = new Size(480, 276),
             BackColor = Bg,
             ForeColor = Fg,
         };
@@ -1152,6 +1152,7 @@ public sealed class MainForm : Form
         var monCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 330, FlatStyle = FlatStyle.Flat };
         var presetCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 300, FlatStyle = FlatStyle.Flat };
         var bitrateCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 200, FlatStyle = FlatStyle.Flat };
+        var encoderCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 200, FlatStyle = FlatStyle.Flat };
         var audioCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 330, FlatStyle = FlatStyle.Flat };
 
         // Build the dialog combos off the dialog's own fresh lists (never the main
@@ -1160,6 +1161,7 @@ public sealed class MainForm : Form
         foreach (var w in dlgWindows) winCombo.Items.Add($"{w.ProcessName} - {Truncate(w.Title, 58)}");
         foreach (var m in dlgMonitors) monCombo.Items.Add($"{m.DeviceName}  {m.Width}x{m.Height}{(m.IsPrimary ? "  (primary)" : "")}");
         foreach (object it in _presetCombo.Items) presetCombo.Items.Add(it);
+        foreach (object it in _encoderCombo.Items) encoderCombo.Items.Add(it);
         audioCombo.Items.Add("No audio");
         audioCombo.Items.Add(rbWin.Checked ? "Captured window's audio" : "No audio (monitor share: pick an app below)");
         foreach (var w in dlgWindows) audioCombo.Items.Add($"{w.ProcessName} - {Truncate(w.Title, 40)}");
@@ -1175,6 +1177,7 @@ public sealed class MainForm : Form
         monCombo.SelectedIndex = curMonDevice is null
             ? -1 : dlgMonitors.FindIndex(m => m.DeviceName.Equals(curMonDevice, StringComparison.OrdinalIgnoreCase));
         presetCombo.SelectedIndex = _presetCombo.SelectedIndex;
+        encoderCombo.SelectedIndex = _encoderCombo.SelectedIndex;
         string curAudioKey = SelectedAudioKey();
         audioCombo.SelectedIndex = curAudioKey switch
         {
@@ -1231,7 +1234,7 @@ public sealed class MainForm : Form
         presetCombo.SelectedIndexChanged += (_, _) => RefreshDlgSourceOptions();
         RefreshDlgSourceOptions();
 
-        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 6, Padding = new Padding(10) };
+        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 7, Padding = new Padding(10) };
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         grid.Controls.Add(rbWin, 0, 0);
@@ -1242,8 +1245,10 @@ public sealed class MainForm : Form
         grid.Controls.Add(presetCombo, 1, 2);
         grid.Controls.Add(new Label { Text = "Bitrate:", AutoSize = true, Margin = new Padding(3, 8, 3, 0), ForeColor = Dim }, 0, 3);
         grid.Controls.Add(bitrateCombo, 1, 3);
-        grid.Controls.Add(new Label { Text = "Audio:", AutoSize = true, Margin = new Padding(3, 8, 3, 0), ForeColor = Dim }, 0, 4);
-        grid.Controls.Add(audioCombo, 1, 4);
+        grid.Controls.Add(new Label { Text = "Encoder:", AutoSize = true, Margin = new Padding(3, 8, 3, 0), ForeColor = Dim }, 0, 4);
+        grid.Controls.Add(encoderCombo, 1, 4);
+        grid.Controls.Add(new Label { Text = "Audio:", AutoSize = true, Margin = new Padding(3, 8, 3, 0), ForeColor = Dim }, 0, 5);
+        grid.Controls.Add(audioCombo, 1, 5);
 
         var ok = new Button { Text = _session is null ? "Start" : "Switch", Width = 96, Height = 28, DialogResult = DialogResult.OK };
         var cancel = new Button { Text = "Cancel", Width = 80, Height = 28, DialogResult = DialogResult.Cancel };
@@ -1251,7 +1256,7 @@ public sealed class MainForm : Form
         buttons.Controls.Add(cancel);
         buttons.Controls.Add(ok);
         grid.SetColumnSpan(buttons, 2);
-        grid.Controls.Add(buttons, 0, 5);
+        grid.Controls.Add(buttons, 0, 6);
         dlg.Controls.Add(grid);
         dlg.AcceptButton = ok;
         dlg.CancelButton = cancel;
@@ -1326,6 +1331,7 @@ public sealed class MainForm : Form
         if (winTarget >= 0) _windowCombo.SelectedIndex = winTarget;
         if (monTarget >= 0) _monitorCombo.SelectedIndex = monTarget;
         if (presetCombo.SelectedIndex >= 0) _presetCombo.SelectedIndex = presetCombo.SelectedIndex;
+        if (encoderCombo.SelectedIndex >= 0) _encoderCombo.SelectedIndex = encoderCombo.SelectedIndex;
         SelectAudioByKey(pickedAudioKey);
         // Writing the source/preset back above repopulated the main bitrate combo;
         // now apply the tier the user picked in the dialog.
@@ -1553,9 +1559,8 @@ public sealed class MainForm : Form
     }
 
     /// <summary>While live, the pickers that only take effect through a restart
-    /// are locked so Switch source is the obvious path. Name, port, and encoder
-    /// stay editable (name/port are read at the next start; the encoder has no
-    /// place in the Switch popup).</summary>
+    /// are locked so Switch source is the obvious path. Name and port stay
+    /// editable because they are read at the next start.</summary>
     private void SetLiveLock(bool locked)
     {
         bool on = !locked;
@@ -1565,6 +1570,7 @@ public sealed class MainForm : Form
         _monitorCombo.Enabled = on;
         _presetCombo.Enabled = on;
         _bitrateCombo.Enabled = on;
+        _encoderCombo.Enabled = on;
         _audioCombo.Enabled = on;
     }
 
