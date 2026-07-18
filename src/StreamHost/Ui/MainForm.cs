@@ -235,6 +235,7 @@ public sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer _idleRetryTimer = new() { Interval = 15000 };
     private bool _idleBindFailed;
     private readonly IdlePreviewCapture _idlePreviewCapture = new();
+    private UiHangWatchdog? _uiHangWatchdog;
     private IntPtr _previewWaitingWindow;
     private bool _previewPausedForForm = true;
     private bool _closing;
@@ -479,6 +480,7 @@ public sealed class MainForm : Form
             // streaming with no handle left to stop it. Take the whole app down
             // (the ChildJob job object reaps ffmpeg on process exit); this also
             // closes any open Watch window, a cost accepted over an invisible stream.
+            using IDisposable? stopOperation = _uiHangWatchdog?.TrackOperation("stream stop UI phase");
             if (session is not null && !session.Stop())
             {
                 Console.WriteLine("[shutdown] stream teardown did not finish in time; closing the app to avoid an invisible stream.");
@@ -496,6 +498,8 @@ public sealed class MainForm : Form
             _previewDebounceTimer.Dispose();
             _previewPollTimer.Dispose();
             _toolTip.Dispose();
+            _uiHangWatchdog?.Dispose();
+            _uiHangWatchdog = null;
         };
 
         Console.WriteLine("[boot] source enumeration start");
@@ -516,6 +520,7 @@ public sealed class MainForm : Form
         base.OnHandleCreated(e);
         int on = 1;
         _ = DwmSetWindowAttribute(Handle, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, ref on, sizeof(int));
+        _uiHangWatchdog ??= new UiHangWatchdog(this, _idlePreviewCapture.GetProgressSnapshot);
     }
 
     private GroupBox MakeGroup(string title, int height) => new()
@@ -606,6 +611,7 @@ public sealed class MainForm : Form
 
         StopIdlePreview(placeholder: "Waiting for preview...");
         SetPreviewLayoutVisible(true);
+        using IDisposable? operation = _uiHangWatchdog?.TrackOperation("preview start");
 
         IdlePreviewStartState startState;
         try
@@ -751,6 +757,7 @@ public sealed class MainForm : Form
 
     private void StopIdlePreview(bool hideLayout = false, string placeholder = "Preview available while idle.")
     {
+        using IDisposable? operation = _uiHangWatchdog?.TrackOperation("preview stop");
         _previewDebounceTimer.Stop();
         _previewPollTimer.Stop();
         _previewWaitingWindow = IntPtr.Zero;
@@ -798,6 +805,7 @@ public sealed class MainForm : Form
 
     private void PopulateMonitors()
     {
+        using IDisposable? operation = _uiHangWatchdog?.TrackOperation("monitor source repopulation");
         int keep = _monitorCombo.SelectedIndex;
         _monitors = MonitorEnumerator.GetMonitors();
         _monitorCombo.BeginUpdate();
@@ -823,6 +831,7 @@ public sealed class MainForm : Form
 
     private void PopulateWindows()
     {
+        using IDisposable? operation = _uiHangWatchdog?.TrackOperation("window source repopulation");
         string? keepProcess = _windowCombo.SelectedIndex >= 0 && _windowCombo.SelectedIndex < _windows.Count
             ? _windows[_windowCombo.SelectedIndex].ProcessName : null;
         string? keepAudio = SelectedAudioKey();
@@ -957,6 +966,7 @@ public sealed class MainForm : Form
     /// CPU-encoder retry when the live video pipeline stalls. Returns false if it couldn't start.</summary>
     private async Task<bool> LaunchSessionAsync(SessionConfig config)
     {
+        using IDisposable? operation = _uiHangWatchdog?.TrackOperation("stream start UI phase");
         _previewDebounceTimer.Stop();
         _previewPollTimer.Stop();
         _previewWaitingWindow = IntPtr.Zero;
@@ -1075,6 +1085,7 @@ public sealed class MainForm : Form
     /// the stream is gone while the old session still owns the port.</summary>
     private void StopStream()
     {
+        using IDisposable? operation = _uiHangWatchdog?.TrackOperation("stream stop UI phase");
         if (_session is null || _stopping) return;
         _pendingCpuRetry = false;
         _pendingSwitch = null;
@@ -1110,11 +1121,16 @@ public sealed class MainForm : Form
         // controls, so pressing Cancel leaves the main window's selection exactly
         // as it was. The main lists are refreshed only on OK, below.
         uint ownPid = (uint)Environment.ProcessId;
-        var dlgWindows = WindowEnumerator.GetWindows()
-            .Where(w => w.Pid != ownPid)
-            .OrderBy(w => w.ProcessName, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-        var dlgMonitors = MonitorEnumerator.GetMonitors();
+        List<WindowDescription> dlgWindows;
+        List<MonitorDescription> dlgMonitors;
+        using (_uiHangWatchdog?.TrackOperation("source dialog repopulation"))
+        {
+            dlgWindows = WindowEnumerator.GetWindows()
+                .Where(w => w.Pid != ownPid)
+                .OrderBy(w => w.ProcessName, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            dlgMonitors = MonitorEnumerator.GetMonitors();
+        }
 
         using var dlg = new Form
         {
@@ -1328,6 +1344,7 @@ public sealed class MainForm : Form
     /// short blip. Under the hood it is a clean stop + start.</summary>
     private async void SwitchSource()
     {
+        using IDisposable? operation = _uiHangWatchdog?.TrackOperation("stream switch UI phase");
         if (_session is null) { await StartStreamAsync(); return; }
         if (_stopping) return;
         var config = BuildConfigFromUi(_livePort, _session.ViewKey);
@@ -1345,6 +1362,7 @@ public sealed class MainForm : Form
 
     private void OnSessionStopped(string? reason, bool wentLive)
     {
+        using IDisposable? operation = _uiHangWatchdog?.TrackOperation("stream stop completion");
         _statsTimer.Stop();
         _session = null;
         _stopping = false;
@@ -2223,6 +2241,7 @@ public sealed class MainForm : Form
 
     private void SaveSettings()
     {
+        using IDisposable? operation = _uiHangWatchdog?.TrackOperation("settings save");
         try
         {
             var s = new AppSettings

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
@@ -29,12 +30,14 @@ internal readonly record struct IdlePreviewPollResult(IdlePreviewPollState State
 internal sealed class IdlePreviewCapture : IDisposable
 {
     private static readonly TimeSpan CreationTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan ReadbackTimeout = TimeSpan.FromSeconds(5);
 
     private readonly object _stateGate = new();
     private Task _lifecycleTail = Task.CompletedTask;
     private Task _attachedCleanup = Task.CompletedTask;
     private CancellationTokenSource? _activeCreation;
     private PreviewResources? _resources;
+    private PreviewPollOperation? _activePoll;
     private int _generation;
     private bool _streamStartFenced;
     private bool _disposed;
@@ -83,12 +86,14 @@ internal sealed class IdlePreviewCapture : IDisposable
 
             PreviewResources? previousResources = _resources;
             _resources = null;
+            PreviewPollOperation? previousPoll = DetachPoll(previousResources);
             Task previousLifecycle = _lifecycleTail;
             trace = new CaptureCreationTrace(targetKind);
             creation = Task.Run(
                 () => CreateAfterPreviousAsync(
                     previousLifecycle,
                     previousResources,
+                    previousPoll,
                     generation,
                     creationCts,
                     windowHandle,
@@ -109,6 +114,7 @@ internal sealed class IdlePreviewCapture : IDisposable
     private async Task<CreationOutcome> CreateAfterPreviousAsync(
         Task previousLifecycle,
         PreviewResources? previousResources,
+        PreviewPollOperation? previousPoll,
         int generation,
         CancellationTokenSource creationCts,
         IntPtr windowHandle,
@@ -118,7 +124,11 @@ internal sealed class IdlePreviewCapture : IDisposable
         try
         {
             await previousLifecycle.ConfigureAwait(false);
-            previousResources?.Dispose();
+            if (previousResources is not null &&
+                !await DisposeAfterPollAsync(previousResources, previousPoll, "source-change teardown"))
+            {
+                return new CreationOutcome(IdlePreviewStartState.TimedOut);
+            }
 
             if (!CanCreate(generation, creationCts))
                 return CreationOutcome.Canceled;
@@ -207,8 +217,49 @@ internal sealed class IdlePreviewCapture : IDisposable
 
     public IdlePreviewPollResult Poll()
     {
+        PreviewPollOperation timedOut;
+        CaptureProgressSnapshot progress;
         lock (_stateGate)
-            return _resources?.Poll() ?? default;
+        {
+            if (_resources is null)
+                return default;
+
+            if (_activePoll is null)
+            {
+                _activePoll = new PreviewPollOperation(_resources);
+                return default;
+            }
+
+            if (_activePoll.Task.IsCompleted)
+            {
+                // Start the next readback before handing back this result, or the
+                // preview cadence halves to one frame per two poll ticks.
+                PreviewPollOperation completed = _activePoll;
+                _activePoll = new PreviewPollOperation(_resources);
+                return completed.TakeResult();
+            }
+
+            if (_activePoll.Elapsed < ReadbackTimeout)
+                return default;
+
+            timedOut = _activePoll;
+            _activePoll = null;
+            _resources = null;
+            _generation++;
+            timedOut.Abandon();
+            progress = timedOut.Resources.GetProgressSnapshot();
+        }
+
+        Console.WriteLine(
+            $"[preview] frame readback stuck for 5 seconds; {FormatCaptureProgress(progress)}; " +
+            "capture abandoned; preview disabled.");
+        return new IdlePreviewPollResult(IdlePreviewPollState.Unavailable);
+    }
+
+    public CaptureProgressSnapshot? GetProgressSnapshot()
+    {
+        lock (_stateGate)
+            return _resources?.GetProgressSnapshot();
     }
 
     public void Stop()
@@ -333,28 +384,74 @@ internal sealed class IdlePreviewCapture : IDisposable
         if (resources is null)
             return _attachedCleanup;
 
-        Task cleanup = RunCleanupAfterAsync(_lifecycleTail, resources, action);
+        PreviewPollOperation? poll = DetachPoll(resources);
+
+        Task cleanup = RunCleanupAfterAsync(_lifecycleTail, resources, poll, action);
         _lifecycleTail = cleanup;
         _attachedCleanup = cleanup;
         return cleanup;
     }
 
-    private static Task RunCleanupAfterAsync(
+    private PreviewPollOperation? DetachPoll(PreviewResources? resources)
+    {
+        if (_activePoll is null || !ReferenceEquals(_activePoll.Resources, resources))
+            return null;
+
+        PreviewPollOperation poll = _activePoll;
+        _activePoll = null;
+        poll.DiscardResult();
+        return poll;
+    }
+
+    private static async Task RunCleanupAfterAsync(
         Task previousLifecycle,
         PreviewResources resources,
+        PreviewPollOperation? poll,
         string action) =>
-        Task.Run(async () =>
+        await Task.Run(async () =>
         {
             try
             {
                 await previousLifecycle.ConfigureAwait(false);
-                resources.Dispose();
+                await DisposeAfterPollAsync(resources, poll, action).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"[preview] {action} failed: {SingleLine(ex.Message)}");
             }
-        });
+        }).ConfigureAwait(false);
+
+    private static async Task<bool> DisposeAfterPollAsync(
+        PreviewResources resources,
+        PreviewPollOperation? poll,
+        string action)
+    {
+        if (poll is not null && !poll.Task.IsCompleted)
+        {
+            TimeSpan remaining = ReadbackTimeout - poll.Elapsed;
+            if (remaining > TimeSpan.Zero)
+            {
+                Task finished = await Task.WhenAny(poll.Task, Task.Delay(remaining)).ConfigureAwait(false);
+                if (finished == poll.Task)
+                    await poll.Task.ConfigureAwait(false);
+            }
+
+            if (!poll.Task.IsCompleted)
+            {
+                if (poll.Abandon())
+                {
+                    CaptureProgressSnapshot progress = resources.GetProgressSnapshot();
+                    Console.WriteLine(
+                        $"[preview] frame readback stuck for 5 seconds during {action}; " +
+                        $"{FormatCaptureProgress(progress)}; capture abandoned.");
+                }
+                return false;
+            }
+        }
+
+        resources.Dispose();
+        return true;
+    }
 
     private void ReleaseStreamStartFence()
     {
@@ -362,6 +459,11 @@ internal sealed class IdlePreviewCapture : IDisposable
     }
 
     private static string SingleLine(string value) => value.Replace('\r', ' ').Replace('\n', ' ');
+
+    private static string FormatCaptureProgress(CaptureProgressSnapshot progress) =>
+        $"callback-stage={progress.CallbackStage}, readback-stage={progress.ReadbackStage}, " +
+        $"callbacks={progress.CallbacksStarted}, frames-ready={progress.FramesReady}, " +
+        $"readbacks={progress.ReadbacksCompleted}/{progress.ReadbacksStarted}";
 
     public void Dispose()
     {
@@ -378,6 +480,64 @@ internal sealed class IdlePreviewCapture : IDisposable
     {
         public static CreationOutcome Ready => new(IdlePreviewStartState.Ready);
         public static CreationOutcome Canceled => new(IdlePreviewStartState.Canceled);
+    }
+
+    private sealed class PreviewPollOperation
+    {
+        private int _abandoned;
+        private int _discardResult;
+        private int _resultDisposed;
+
+        public PreviewPollOperation(PreviewResources resources)
+        {
+            Resources = resources;
+            StartedTicks = Stopwatch.GetTimestamp();
+            Task = System.Threading.Tasks.Task.Run(() =>
+            {
+                try
+                {
+                    return resources.Poll();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[preview] frame readback worker failed: {SingleLine(ex.Message)}");
+                    return new IdlePreviewPollResult(IdlePreviewPollState.Unavailable);
+                }
+            });
+            _ = Task.ContinueWith(
+                _ => DisposeDiscardedResult(),
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }
+
+        public PreviewResources Resources { get; }
+        public Task<IdlePreviewPollResult> Task { get; }
+        public long StartedTicks { get; }
+        public TimeSpan Elapsed => Stopwatch.GetElapsedTime(StartedTicks);
+
+        public IdlePreviewPollResult TakeResult() => Task.GetAwaiter().GetResult();
+
+        public bool Abandon()
+        {
+            bool first = Interlocked.Exchange(ref _abandoned, 1) == 0;
+            DiscardResult();
+            return first;
+        }
+
+        public void DiscardResult()
+        {
+            Volatile.Write(ref _discardResult, 1);
+            DisposeDiscardedResult();
+        }
+
+        private void DisposeDiscardedResult()
+        {
+            if (Volatile.Read(ref _discardResult) == 0 || !Task.IsCompletedSuccessfully)
+                return;
+            if (Interlocked.Exchange(ref _resultDisposed, 1) == 0)
+                Task.Result.Image?.Dispose();
+        }
     }
 
     internal sealed class IdlePreviewStreamFence : IDisposable
@@ -470,6 +630,9 @@ internal sealed class IdlePreviewCapture : IDisposable
             _lastState = IdlePreviewPollState.Frame;
             return new IdlePreviewPollResult(IdlePreviewPollState.Frame, CreateScaledBitmap());
         }
+
+        public CaptureProgressSnapshot GetProgressSnapshot() =>
+            ((ICaptureDiagnostics)_capture).GetProgressSnapshot();
 
         private IdlePreviewPollResult ChangedState(IdlePreviewPollState state)
         {
