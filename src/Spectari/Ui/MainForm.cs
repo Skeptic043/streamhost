@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Spectari.Capture;
 using Spectari.Server;
 using Spectari.Util;
@@ -77,7 +78,10 @@ public sealed class MainForm : Form
     {
         public string SourceKind { get; set; } = "window";
         public string WindowProcess { get; set; } = "";
-        public int MonitorIndex { get; set; }
+        public string MonitorDeviceName { get; set; } = "";
+        [JsonPropertyName("MonitorIndex")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public int? LegacyMonitorIndex { get; set; }
         // Presets are stored by height+fps, not array index - adding a preset
         // used to silently shift everyone's saved choice.
         public int PresetHeight { get; set; } = 1080;
@@ -169,8 +173,7 @@ public sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer _previewDebounceTimer = new() { Interval = 300 };
     private readonly System.Windows.Forms.Timer _previewPollTimer = new() { Interval = 500 };
 
-    private List<WindowDescription> _windows = [];
-    private List<MonitorDescription> _monitors = [];
+    private readonly SourceSelectionModel _sourceSelection = new();
     private readonly StreamController _streamController;
     private WatchForm? _watchForm;
     private int _livePort; // pinned while streaming so link/copy ignore edits to the port box
@@ -389,13 +392,28 @@ public sealed class MainForm : Form
         _streamController.SessionStarted += RenderStartedStream;
 
         // Nothing gets disabled - the selected radio decides which combo is USED.
-        _windowCombo.DropDown += (_, _) => PopulateWindows();   // fresh list every open
-        _monitorCombo.DropDown += (_, _) => PopulateMonitors(); // monitors change too (dock/undock)
-        _rbWindow.CheckedChanged += (_, _) => { UpdateAudioModeLabel(); RefreshSourceOptions(); ScheduleIdlePreviewRefresh(); };
-        _windowCombo.SelectedIndexChanged += (_, _) => RefreshSourceOptions();
+        _windowCombo.DropDown += (_, _) => PopulateWindows();
+        _monitorCombo.DropDown += (_, _) => PopulateMonitors();
+        _rbWindow.CheckedChanged += (_, _) =>
+        {
+            _sourceSelection.SelectKind(_rbWindow.Checked ? SourceKind.Window : SourceKind.Monitor);
+            RenderAudioPicker(_sourceSelection, _audioCombo);
+            RefreshSourceOptions();
+            ScheduleIdlePreviewRefresh();
+        };
+        _windowCombo.SelectedIndexChanged += (_, _) =>
+        {
+            _sourceSelection.SelectWindowIndex(_windowCombo.SelectedIndex);
+            RefreshSourceOptions();
+        };
         _windowCombo.SelectionChangeCommitted += (_, _) => { if (_rbWindow.Checked) ScheduleIdlePreviewRefresh(); };
-        _monitorCombo.SelectedIndexChanged += (_, _) => RefreshSourceOptions();
+        _monitorCombo.SelectedIndexChanged += (_, _) =>
+        {
+            _sourceSelection.SelectMonitorIndex(_monitorCombo.SelectedIndex);
+            RefreshSourceOptions();
+        };
         _monitorCombo.SelectionChangeCommitted += (_, _) => { if (_rbMonitor.Checked) ScheduleIdlePreviewRefresh(); };
+        _audioCombo.SelectedIndexChanged += (_, _) => _sourceSelection.SelectAudioIndex(_audioCombo.SelectedIndex);
         _presetCombo.SelectedIndexChanged += (_, _) => RefreshSourceOptions();
         // The bitrate combo is the single source of truth for the chosen tier:
         // remember every user pick so it survives repopulates (source/preset
@@ -494,7 +512,7 @@ public sealed class MainForm : Form
 
         Console.WriteLine("[boot] source enumeration start");
         PopulateSources();
-        Console.WriteLine($"[boot] source enumeration complete: {_windows.Count} windows, {_monitors.Count} monitors");
+        Console.WriteLine($"[boot] source enumeration complete: {_sourceSelection.Windows.Count} windows, {_sourceSelection.Monitors.Count} monitors");
         LoadSettings();
         Console.WriteLine("[boot] update check start");
         _ = CheckForUpdatesAsync();
@@ -606,18 +624,18 @@ public sealed class MainForm : Form
         try
         {
             Console.WriteLine(
-                $"[preview] start pick: kind={(_rbWindow.Checked ? "window" : "monitor")} " +
-                $"windowIndex={_windowCombo.SelectedIndex} monitorIndex={_monitorCombo.SelectedIndex}");
-            if (_rbWindow.Checked)
+                $"[preview] start pick: kind={(_sourceSelection.Kind == SourceKind.Window ? "window" : "monitor")} " +
+                $"windowIndex={_sourceSelection.SelectedWindowIndex} monitorIndex={_sourceSelection.SelectedMonitorIndex}");
+            if (_sourceSelection.Kind == SourceKind.Window)
             {
-                int index = _windowCombo.SelectedIndex;
-                if (index < 0 || index >= _windows.Count)
+                WindowDescription? window = _sourceSelection.SelectedWindow;
+                if (window is null)
                 {
                     SetPreviewPlaceholder("Select a source to preview.");
                     return;
                 }
 
-                IntPtr handle = _windows[index].Handle;
+                IntPtr handle = window.Handle;
                 if (!IsWindow(handle))
                 {
                     SetPreviewPlaceholder("Source is closed or unavailable.");
@@ -636,14 +654,14 @@ public sealed class MainForm : Form
             }
             else
             {
-                int index = _monitorCombo.SelectedIndex;
-                if (index < 0 || index >= _monitors.Count)
+                MonitorDescription? monitor = _sourceSelection.SelectedMonitor;
+                if (monitor is null)
                 {
                     SetPreviewPlaceholder("Select a source to preview.");
                     return;
                 }
 
-                startResult = await _idlePreviewCapture.StartForMonitorAsync(_monitors[index].Handle);
+                startResult = await _idlePreviewCapture.StartForMonitorAsync(monitor.Handle);
             }
 
             IdlePreviewStartState startState = startResult.State;
@@ -796,79 +814,39 @@ public sealed class MainForm : Form
     private void PopulateMonitors()
     {
         using IDisposable? operation = _uiHangWatchdog?.TrackOperation("monitor source repopulation");
-        int keep = _monitorCombo.SelectedIndex;
-        _monitors = MonitorEnumerator.GetMonitors();
-        _monitorCombo.BeginUpdate();
-        _monitorCombo.Items.Clear();
-        foreach (var m in _monitors)
-            _monitorCombo.Items.Add($"{m.DeviceName}  {m.Width}x{m.Height}{(m.IsPrimary ? "  (primary)" : "")}");
-        _monitorCombo.EndUpdate();
-        if (_monitorCombo.Items.Count > 0)
-            _monitorCombo.SelectedIndex = keep >= 0 && keep < _monitorCombo.Items.Count ? keep : 0;
-    }
-
-    /// <summary>"Captured window's audio" is a trap during a monitor share (it
-    /// resolves to silence) - relabel it so people pick an actual app instead.</summary>
-    private void UpdateAudioModeLabel()
-    {
-        if (_audioCombo.Items.Count < 2) return;
-        int keep = _audioCombo.SelectedIndex;
-        _audioCombo.Items[1] = _rbWindow.Checked
-            ? "Captured window's audio"
-            : "No audio (monitor share: pick an app below)";
-        if (keep >= 0) _audioCombo.SelectedIndex = keep;
+        _sourceSelection.RefreshMonitors();
+        RenderPicker(_monitorCombo, _sourceSelection.MonitorDisplayItems, _sourceSelection.SelectedMonitorIndex);
     }
 
     private void PopulateWindows()
     {
         using IDisposable? operation = _uiHangWatchdog?.TrackOperation("window source repopulation");
-        string? keepProcess = _windowCombo.SelectedIndex >= 0 && _windowCombo.SelectedIndex < _windows.Count
-            ? _windows[_windowCombo.SelectedIndex].ProcessName : null;
-        string? keepAudio = SelectedAudioKey();
-
-        uint ownPid = (uint)Environment.ProcessId;
-        _windows = WindowEnumerator.GetWindows()
-            .Where(w => w.Pid != ownPid)
-            .OrderBy(w => w.ProcessName, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-        _windowCombo.BeginUpdate();
-        _windowCombo.Items.Clear();
-        foreach (var w in _windows)
-            _windowCombo.Items.Add($"{w.ProcessName} - {Truncate(w.Title, 58)}");
-        _windowCombo.EndUpdate();
-
-        int restore = keepProcess is null ? -1
-            : _windows.FindIndex(w => w.ProcessName.Equals(keepProcess, StringComparison.OrdinalIgnoreCase));
-        if (_windowCombo.Items.Count > 0)
-            _windowCombo.SelectedIndex = restore >= 0 ? restore : 0;
-
-        // Audio picker: none / follow the captured window / any running app.
-        _audioCombo.BeginUpdate();
-        _audioCombo.Items.Clear();
-        _audioCombo.Items.Add("No audio");
-        _audioCombo.Items.Add("Captured window's audio");
-        foreach (var w in _windows)
-            _audioCombo.Items.Add($"{w.ProcessName} - {Truncate(w.Title, 40)}");
-        _audioCombo.EndUpdate();
-        SelectAudioByKey(keepAudio ?? "window");
-        UpdateAudioModeLabel();
+        _sourceSelection.RefreshWindows();
+        RenderPicker(_windowCombo, _sourceSelection.WindowDisplayItems, _sourceSelection.SelectedWindowIndex);
+        RenderAudioPicker(_sourceSelection, _audioCombo);
     }
 
-    /// <summary>"none", "window", or a process name.</summary>
-    private string SelectedAudioKey() => _audioCombo.SelectedIndex switch
+    private static void RenderSourcePickers(
+        SourceSelectionModel sourceSelection,
+        ComboBox windowCombo,
+        ComboBox monitorCombo,
+        ComboBox audioCombo)
     {
-        0 => "none",
-        1 => "window",
-        > 1 when _audioCombo.SelectedIndex - 2 < _windows.Count => _windows[_audioCombo.SelectedIndex - 2].ProcessName,
-        _ => "window",
-    };
+        RenderPicker(windowCombo, sourceSelection.WindowDisplayItems, sourceSelection.SelectedWindowIndex);
+        RenderPicker(monitorCombo, sourceSelection.MonitorDisplayItems, sourceSelection.SelectedMonitorIndex);
+        RenderAudioPicker(sourceSelection, audioCombo);
+    }
 
-    private void SelectAudioByKey(string key)
+    private static void RenderAudioPicker(SourceSelectionModel sourceSelection, ComboBox audioCombo) =>
+        RenderPicker(audioCombo, sourceSelection.AudioDisplayItems, sourceSelection.SelectedAudioIndex);
+
+    private static void RenderPicker(ComboBox combo, IReadOnlyList<string> items, int selectedIndex)
     {
-        if (key == "none") { _audioCombo.SelectedIndex = 0; return; }
-        if (key == "window") { _audioCombo.SelectedIndex = 1; return; }
-        int idx = _windows.FindIndex(w => w.ProcessName.Equals(key, StringComparison.OrdinalIgnoreCase));
-        _audioCombo.SelectedIndex = idx >= 0 ? idx + 2 : 1;
+        combo.BeginUpdate();
+        combo.Items.Clear();
+        foreach (string item in items) combo.Items.Add(item);
+        combo.SelectedIndex = selectedIndex >= 0 && selectedIndex < items.Count ? selectedIndex : -1;
+        combo.EndUpdate();
     }
 
     private async Task StartStreamAsync()
@@ -897,26 +875,17 @@ public sealed class MainForm : Form
 
         // Resolve the audio source: none / follow captured window / a specific app.
         // "Captured window's audio" during a monitor share resolves to no audio.
-        uint audioPid = 0;
-        string audioKey = SelectedAudioKey();
-        if (audioKey == "window")
-        {
-            if (_rbWindow.Checked && _windowCombo.SelectedIndex >= 0)
-                audioPid = _windows[_windowCombo.SelectedIndex].Pid;
-        }
-        else if (audioKey != "none")
-        {
-            int idx = _windows.FindIndex(w => w.ProcessName.Equals(audioKey, StringComparison.OrdinalIgnoreCase));
-            if (idx >= 0) audioPid = _windows[idx].Pid;
-            else AppendLog($"[audio] '{audioKey}' is not running; streaming without audio");
-        }
+        uint audioPid = _sourceSelection.SelectedAudioPid;
+        string audioKey = _sourceSelection.AudioKey;
+        if (audioKey is not (SourceSelectionModel.NoAudioKey or SourceSelectionModel.CapturedWindowAudioKey) && audioPid == 0)
+            AppendLog($"[audio] '{audioKey}' is not running; streaming without audio");
 
         IntPtr windowHandle = IntPtr.Zero, monitorHandle = IntPtr.Zero;
         string sourceName;
-        if (_rbWindow.Checked)
+        if (_sourceSelection.Kind == SourceKind.Window)
         {
-            if (_windowCombo.SelectedIndex < 0) { AppendLog("No window selected."); return null; }
-            var w = _windows[_windowCombo.SelectedIndex];
+            WindowDescription? w = _sourceSelection.SelectedWindow;
+            if (w is null) { AppendLog("No window selected."); return null; }
             if (!IsWindow(w.Handle))
             {
                 AppendLog("The selected window no longer exists. Pick another source.");
@@ -928,8 +897,8 @@ public sealed class MainForm : Form
         }
         else
         {
-            if (_monitorCombo.SelectedIndex < 0) { AppendLog("No monitor selected."); return null; }
-            var m = _monitors[_monitorCombo.SelectedIndex];
+            MonitorDescription? m = _sourceSelection.SelectedMonitor;
+            if (m is null) { AppendLog("No monitor selected."); return null; }
             monitorHandle = m.Handle;
             sourceName = m.DeviceName;
         }
@@ -1019,20 +988,9 @@ public sealed class MainForm : Form
     {
         if (_streamController.IsStopping) return;
 
-        // Enumerate fresh source lists for the popup WITHOUT touching the main
-        // controls, so pressing Cancel leaves the main window's selection exactly
-        // as it was. The main lists are refreshed only on OK, below.
-        uint ownPid = (uint)Environment.ProcessId;
-        List<WindowDescription> dlgWindows;
-        List<MonitorDescription> dlgMonitors;
+        SourceSelectionModel dialogSources;
         using (_uiHangWatchdog?.TrackOperation("source dialog repopulation"))
-        {
-            dlgWindows = WindowEnumerator.GetWindows()
-                .Where(w => w.Pid != ownPid)
-                .OrderBy(w => w.ProcessName, StringComparer.OrdinalIgnoreCase)
-                .ToList();
-            dlgMonitors = MonitorEnumerator.GetMonitors();
-        }
+            dialogSources = _sourceSelection.CreateFreshSnapshot();
 
         using var dlg = new Form
         {
@@ -1048,8 +1006,8 @@ public sealed class MainForm : Form
         };
         dlg.HandleCreated += (_, _) => { int on = 1; _ = DwmSetWindowAttribute(dlg.Handle, 20, ref on, sizeof(int)); };
 
-        var rbWin = new RadioButton { Text = "Game / window", AutoSize = true, Checked = _rbWindow.Checked };
-        var rbMon = new RadioButton { Text = "Monitor", AutoSize = true, Checked = _rbMonitor.Checked };
+        var rbWin = new RadioButton { Text = "Game / window", AutoSize = true, Checked = dialogSources.Kind == SourceKind.Window };
+        var rbMon = new RadioButton { Text = "Monitor", AutoSize = true, Checked = dialogSources.Kind == SourceKind.Monitor };
         var winCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 330, FlatStyle = FlatStyle.Flat };
         var monCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 330, FlatStyle = FlatStyle.Flat };
         var presetCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 300, FlatStyle = FlatStyle.Flat };
@@ -1057,36 +1015,11 @@ public sealed class MainForm : Form
         var encoderCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 200, FlatStyle = FlatStyle.Flat };
         var audioCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 330, FlatStyle = FlatStyle.Flat };
 
-        // Build the dialog combos off the dialog's own fresh lists (never the main
-        // controls). Same item shapes as PopulateWindows/PopulateMonitors so the OK
-        // path can translate picks back by HWND/DeviceName/key.
-        foreach (var w in dlgWindows) winCombo.Items.Add($"{w.ProcessName} - {Truncate(w.Title, 58)}");
-        foreach (var m in dlgMonitors) monCombo.Items.Add($"{m.DeviceName}  {m.Width}x{m.Height}{(m.IsPrimary ? "  (primary)" : "")}");
+        RenderSourcePickers(dialogSources, winCombo, monCombo, audioCombo);
         foreach (object it in _presetCombo.Items) presetCombo.Items.Add(it);
         foreach (object it in _encoderCombo.Items) encoderCombo.Items.Add(it);
-        audioCombo.Items.Add("No audio");
-        audioCombo.Items.Add(rbWin.Checked ? "Captured window's audio" : "No audio (monitor share: pick an app below)");
-        foreach (var w in dlgWindows) audioCombo.Items.Add($"{w.ProcessName} - {Truncate(w.Title, 40)}");
-
-        // Preselect the current capture source by exact identity. If it vanished
-        // between enumerations, leave it unselected so the user must pick again.
-        IntPtr? curWinHandle = _windowCombo.SelectedIndex >= 0 && _windowCombo.SelectedIndex < _windows.Count
-            ? _windows[_windowCombo.SelectedIndex].Handle : null;
-        winCombo.SelectedIndex = curWinHandle is null
-            ? -1 : dlgWindows.FindIndex(w => w.Handle == curWinHandle.Value);
-        string? curMonDevice = _monitorCombo.SelectedIndex >= 0 && _monitorCombo.SelectedIndex < _monitors.Count
-            ? _monitors[_monitorCombo.SelectedIndex].DeviceName : null;
-        monCombo.SelectedIndex = curMonDevice is null
-            ? -1 : dlgMonitors.FindIndex(m => m.DeviceName.Equals(curMonDevice, StringComparison.OrdinalIgnoreCase));
         presetCombo.SelectedIndex = _presetCombo.SelectedIndex;
         encoderCombo.SelectedIndex = _encoderCombo.SelectedIndex;
-        string curAudioKey = SelectedAudioKey();
-        audioCombo.SelectedIndex = curAudioKey switch
-        {
-            "none" => 0,
-            "window" => 1,
-            _ => dlgWindows.FindIndex(w => w.ProcessName.Equals(curAudioKey, StringComparison.OrdinalIgnoreCase)) is int ai && ai >= 0 ? ai + 2 : 1,
-        };
         // Refresh the dialog's Native labels and bitrate choices from one immutable
         // enumerated size snapshot, matching the main controls.
         bool refreshingDlgSourceOptions = false;
@@ -1096,7 +1029,7 @@ public sealed class MainForm : Form
             refreshingDlgSourceOptions = true;
             try
             {
-                var sourceSize = SelectedSourceSize(rbWin.Checked, winCombo.SelectedIndex, monCombo.SelectedIndex, dlgWindows, dlgMonitors);
+                var sourceSize = dialogSources.SelectedSourceSize;
                 for (int idx = 0; idx < Presets.Length && idx < presetCombo.Items.Count; idx++)
                 {
                     if (Presets[idx].Height != 0) continue;
@@ -1125,14 +1058,21 @@ public sealed class MainForm : Form
         }
         rbWin.CheckedChanged += (_, _) =>
         {
-            if (audioCombo.Items.Count >= 2)
-                audioCombo.Items[1] = rbWin.Checked
-                    ? "Captured window's audio"
-                    : "No audio (monitor share: pick an app below)";
+            dialogSources.SelectKind(rbWin.Checked ? SourceKind.Window : SourceKind.Monitor);
+            RenderAudioPicker(dialogSources, audioCombo);
             RefreshDlgSourceOptions();
         };
-        winCombo.SelectedIndexChanged += (_, _) => RefreshDlgSourceOptions();
-        monCombo.SelectedIndexChanged += (_, _) => RefreshDlgSourceOptions();
+        winCombo.SelectedIndexChanged += (_, _) =>
+        {
+            dialogSources.SelectWindowIndex(winCombo.SelectedIndex);
+            RefreshDlgSourceOptions();
+        };
+        monCombo.SelectedIndexChanged += (_, _) =>
+        {
+            dialogSources.SelectMonitorIndex(monCombo.SelectedIndex);
+            RefreshDlgSourceOptions();
+        };
+        audioCombo.SelectedIndexChanged += (_, _) => dialogSources.SelectAudioIndex(audioCombo.SelectedIndex);
         presetCombo.SelectedIndexChanged += (_, _) => RefreshDlgSourceOptions();
         RefreshDlgSourceOptions();
 
@@ -1183,58 +1123,30 @@ public sealed class MainForm : Form
         // Match the picked capture source by stable identity: HWND for a window and
         // device name for a monitor. Preset remains by index and audio by key.
         PopulateSources();
-
-        // Window pick, resolved whether or not the window radio is active (so a later
-        // switch back to it stays correct). Only an ACTIVE-but-unresolved pick aborts.
-        int winTarget = -1;
-        string? winProc = null;
-        if (winCombo.SelectedIndex >= 0 && winCombo.SelectedIndex < dlgWindows.Count)
+        SourceSelection pickedSelection = dialogSources.CurrentSelection;
+        SourceSelectionApplyFailure applyFailure = _sourceSelection.TryApplySelection(pickedSelection);
+        if (applyFailure != SourceSelectionApplyFailure.None)
         {
-            var pickedWindow = dlgWindows[winCombo.SelectedIndex];
-            winProc = pickedWindow.ProcessName;
-            winTarget = _windows.FindIndex(w => w.Handle == pickedWindow.Handle);
-        }
-        if (rbWin.Checked && winTarget < 0)
-        {
-            AppendLog($"Switch cancelled: '{winProc ?? "the picked window"}' is no longer available. Pick again.");
-            ResumeIdlePreview();
-            return;
-        }
-        int monTarget = -1;
-        if (monCombo.SelectedIndex >= 0 && monCombo.SelectedIndex < dlgMonitors.Count)
-        {
-            string deviceName = dlgMonitors[monCombo.SelectedIndex].DeviceName;
-            monTarget = _monitors.FindIndex(m => m.DeviceName.Equals(deviceName, StringComparison.OrdinalIgnoreCase));
-        }
-        if (rbMon.Checked && monTarget < 0)
-        {
-            AppendLog("Switch cancelled: the picked monitor is no longer available. Pick again.");
-            ResumeIdlePreview();
-            return;
-        }
-        string pickedAudioKey = audioCombo.SelectedIndex switch
-        {
-            0 => "none",
-            1 => "window",
-            > 1 when audioCombo.SelectedIndex - 2 < dlgWindows.Count => dlgWindows[audioCombo.SelectedIndex - 2].ProcessName,
-            _ => "window",
-        };
-        if (pickedAudioKey is not ("none" or "window") &&
-            _windows.FindIndex(w => w.ProcessName.Equals(pickedAudioKey, StringComparison.OrdinalIgnoreCase)) < 0)
-        {
-            AppendLog($"Switch cancelled: audio source '{pickedAudioKey}' is no longer available. Pick again.");
+            string message = applyFailure switch
+            {
+                SourceSelectionApplyFailure.WindowUnavailable =>
+                    $"Switch cancelled: '{dialogSources.SelectedWindow?.ProcessName ?? "the picked window"}' is no longer available. Pick again.",
+                SourceSelectionApplyFailure.MonitorUnavailable =>
+                    "Switch cancelled: the picked monitor is no longer available. Pick again.",
+                SourceSelectionApplyFailure.AudioUnavailable =>
+                    $"Switch cancelled: audio source '{pickedSelection.AudioKey}' is no longer available. Pick again.",
+                _ => "Switch cancelled: the picked source is no longer available. Pick again.",
+            };
+            AppendLog(message);
             ResumeIdlePreview();
             return;
         }
 
-        // All picks resolved: now apply them to the main controls.
-        _rbWindow.Checked = rbWin.Checked;
-        _rbMonitor.Checked = rbMon.Checked;
-        if (winTarget >= 0) _windowCombo.SelectedIndex = winTarget;
-        if (monTarget >= 0) _monitorCombo.SelectedIndex = monTarget;
+        _rbWindow.Checked = _sourceSelection.Kind == SourceKind.Window;
+        _rbMonitor.Checked = _sourceSelection.Kind == SourceKind.Monitor;
+        RenderSourcePickers(_sourceSelection, _windowCombo, _monitorCombo, _audioCombo);
         if (presetCombo.SelectedIndex >= 0) _presetCombo.SelectedIndex = presetCombo.SelectedIndex;
         if (encoderCombo.SelectedIndex >= 0) _encoderCombo.SelectedIndex = encoderCombo.SelectedIndex;
-        SelectAudioByKey(pickedAudioKey);
         // Writing the source/preset back above repopulated the main bitrate combo;
         // now apply the tier the user picked in the dialog.
         if ((bitrateCombo.SelectedItem as BitrateChoice)?.Tier is { } tier)
@@ -1360,7 +1272,7 @@ public sealed class MainForm : Form
         _refreshingSourceOptions = true;
         try
         {
-            var sourceSize = SelectedSourceSize(_rbWindow.Checked, _windowCombo.SelectedIndex, _monitorCombo.SelectedIndex, _windows, _monitors);
+            var sourceSize = _sourceSelection.SelectedSourceSize;
             UpdateNativePresetLabel(sourceSize);
             PopulateBitrateOptions(sourceSize);
         }
@@ -1450,22 +1362,6 @@ public sealed class MainForm : Form
         _bitrateCombo.Enabled = on;
         _encoderCombo.Enabled = on;
         _audioCombo.Enabled = on;
-    }
-
-    /// <summary>Pixel size of the selected source: monitor resolution, or the
-    /// window's stable enumeration snapshot. (0,0) when nothing is resolvable.</summary>
-    private static (int W, int H) SelectedSourceSize(bool windowChecked, int windowIdx, int monitorIdx,
-        List<WindowDescription> windows, List<MonitorDescription> monitors)
-    {
-        if (windowChecked)
-        {
-            if (windowIdx < 0 || windowIdx >= windows.Count) return (0, 0);
-            WindowDescription window = windows[windowIdx];
-            return (window.Width, window.Height);
-        }
-        if (monitorIdx >= 0 && monitorIdx < monitors.Count)
-            return (monitors[monitorIdx].Width, monitors[monitorIdx].Height);
-        return (0, 0);
     }
 
     /// <summary>The Low/Medium/High options for a preset applied to a source:
@@ -2086,21 +1982,18 @@ public sealed class MainForm : Form
                 return;
             }
 
-            _rbMonitor.Checked = s.SourceKind == "monitor";
-            _rbWindow.Checked = !_rbMonitor.Checked;
-            if (s.MonitorIndex >= 0 && s.MonitorIndex < _monitorCombo.Items.Count)
-                _monitorCombo.SelectedIndex = s.MonitorIndex;
-            if (!string.IsNullOrEmpty(s.WindowProcess))
-            {
-                int idx = _windows.FindIndex(w => w.ProcessName.Equals(s.WindowProcess, StringComparison.OrdinalIgnoreCase));
-                if (idx >= 0) _windowCombo.SelectedIndex = idx;
-            }
+            _sourceSelection.SelectKind(s.SourceKind == "monitor" ? SourceKind.Monitor : SourceKind.Window);
+            _sourceSelection.SelectMonitorDevice(s.MonitorDeviceName, s.LegacyMonitorIndex);
+            _sourceSelection.SelectWindowProcess(s.WindowProcess);
+            _sourceSelection.SelectAudioKey(s.AudioSource);
+            _rbMonitor.Checked = _sourceSelection.Kind == SourceKind.Monitor;
+            _rbWindow.Checked = _sourceSelection.Kind == SourceKind.Window;
+            RenderSourcePickers(_sourceSelection, _windowCombo, _monitorCombo, _audioCombo);
             // Set the saved tier first: changing the preset index below fires
             // PopulateBitrateOptions, which reads _savedBitrateTier to reselect.
             if (s.BitrateTier is "low" or "med" or "high") _savedBitrateTier = s.BitrateTier;
             int presetIdx = Array.FindIndex(Presets, p => p.Height == s.PresetHeight && p.Fps == s.PresetFps);
             _presetCombo.SelectedIndex = presetIdx >= 0 ? presetIdx : DefaultPresetIndex;
-            SelectAudioByKey(s.AudioSource);
             if (s.Port is >= 1024 and <= 65535) _portInput.Value = s.Port;
             if (!string.IsNullOrWhiteSpace(s.StreamName)) _nameInput.Text = s.StreamName;
             int encIdx = -1;
@@ -2117,7 +2010,6 @@ public sealed class MainForm : Form
             _allowLanPort = s.AllowLanPort;
             _allowLanCheck.Checked = s.AllowLan;
             _skippedUpdateVersion = UpdateChecker.CanonicalVersion(s.SkipUpdateVersion);
-            UpdateAudioModeLabel();
             Console.WriteLine("[boot] settings load complete");
         }
         catch (Exception ex)
@@ -2133,14 +2025,13 @@ public sealed class MainForm : Form
         {
             var s = new AppSettings
             {
-                SourceKind = _rbMonitor.Checked ? "monitor" : "window",
-                WindowProcess = _windowCombo.SelectedIndex >= 0 && _windowCombo.SelectedIndex < _windows.Count
-                    ? _windows[_windowCombo.SelectedIndex].ProcessName : "",
-                MonitorIndex = Math.Max(_monitorCombo.SelectedIndex, 0),
+                SourceKind = _sourceSelection.Kind == SourceKind.Monitor ? "monitor" : "window",
+                WindowProcess = _sourceSelection.SelectedWindow?.ProcessName ?? "",
+                MonitorDeviceName = _sourceSelection.SelectedMonitor?.DeviceName ?? "",
                 PresetHeight = (_presetCombo.SelectedItem as Preset ?? Presets[DefaultPresetIndex]).Height,
                 PresetFps = (_presetCombo.SelectedItem as Preset ?? Presets[DefaultPresetIndex]).Fps,
                 BitrateTier = (_bitrateCombo.SelectedItem as BitrateChoice)?.Tier ?? "med",
-                AudioSource = SelectedAudioKey(),
+                AudioSource = _sourceSelection.AudioKey,
                 Port = (int)_portInput.Value,
                 StreamName = _nameInput.Text.Trim(),
                 Encoder = ((EncoderChoice)_encoderCombo.SelectedItem!).Value,
@@ -2200,6 +2091,4 @@ public sealed class MainForm : Form
             _logBox.Invalidate();
         }
     }
-
-    private static string Truncate(string s, int max) => s.Length <= max ? s : s[..(max - 1)] + "…";
 }

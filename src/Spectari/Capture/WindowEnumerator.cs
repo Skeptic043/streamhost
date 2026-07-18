@@ -20,7 +20,10 @@ public static class WindowEnumerator
     private static readonly Dictionary<WindowIdentity, WindowSize> SizeCache = [];
 
     /// <summary>Visible, titled, non-cloaked top-level windows - the capturable set.</summary>
-    public static List<WindowDescription> GetWindows()
+    public static List<WindowDescription> GetWindows() =>
+        SourceSelectionModel.FilterSurfaceLess(EnumerateWindows());
+
+    internal static List<WindowDescription> EnumerateWindows()
     {
         lock (SizeCacheLock)
         {
@@ -48,7 +51,6 @@ public static class WindowEnumerator
                 var identity = new WindowIdentity(hWnd, pid);
                 seen.Add(identity);
                 WindowSize size = GetStableSize(hWnd, identity);
-                if (size.Width < 2 || size.Height < 2) return true;
                 windows.Add(new WindowDescription(hWnd, title, process, pid, size.Width, size.Height));
                 return true;
             }, IntPtr.Zero);
