@@ -1,6 +1,6 @@
 using System.Diagnostics;
-using System.IO.Pipes;
 using System.Runtime.InteropServices;
+using Spectari.Audio;
 using Spectari.Capture;
 using Spectari.Encode;
 using Spectari.Mp4;
@@ -63,11 +63,6 @@ public sealed class StreamSession
     private readonly CancellationTokenSource _cts = new();
     private Thread? _thread;
 
-    // Audio capture is created asynchronously (when ffmpeg connects to the pipe),
-    // so creation and disposal race on quick start→stop - the gate makes disposal
-    // either find the instance or prevent it from being created at all.
-    private readonly Lock _audioGate = new();
-    private Audio.ProcessAudioCapture? _audioCapture;
     // The session A/V epoch is produced exactly once by the pacing loop at its
     // first successful FrameWriter.Enqueue. Audio waits for this timestamp so
     // both raw ffmpeg inputs describe the same real-time origin.
@@ -238,46 +233,18 @@ public sealed class StreamSession
         if (_config.BitrateKbps <= 0)
             Console.WriteLine($"[encoder] auto bitrate for {outH}p{fps}: {bitrateKbps} kbps");
 
-        string? audioPipeName = _config.AudioPid != 0 ? $"spectari_audio_{_config.Port}" : null;
-        NamedPipeServerStream? audioPipe = null;
-        if (audioPipeName is not null)
-            audioPipe = new NamedPipeServerStream(audioPipeName, PipeDirection.Out, 1,
-                PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+        AudioPipeline? audioPipeline = AudioPipeline.Create(_config.AudioPid, _config.Port);
+        string? audioPipeName = audioPipeline?.PipeName;
 
-        // Every exit path - including a failed port bind throwing out of the
-        // WebServer constructor below - must cancel and release the audio
-        // machinery: the pipe-connection continuation otherwise creates a
-        // capture into a dead session and leaks it (busy thread, WASAPI
-        // session, the pipe itself). Declared before the ffmpeg/server usings
-        // so it runs last, after they are gone.
-        using var audioTeardown = new SalvageableCleanup(() =>
-        {
-            SetTeardownStage("stopping audio");
-            try
-            {
-                _cts.Cancel();
-                // Dispose the pipe first: it unblocks the capture's writer thread if
-                // it is parked on a Write to a now-dead ffmpeg, so the Dispose join
-                // below returns immediately instead of eating its full timeout.
-                audioPipe?.Dispose();
-                lock (_audioGate)
-                {
-                    _audioCapture?.Dispose();
-                    _audioCapture = null;
-                }
-            }
-            finally { SetTeardownStage("audio stopped"); }
-        });
+        // Declared before the downstream lifetimes so audio stops after they do.
+        // Its cancellation prevents delayed startup from surviving an early exit.
+        using var audioTeardown = TrackCleanup(() => audioPipeline?.Dispose(), "audio");
 
         var ffmpeg = new FfmpegEncoder(capture.Width, capture.Height, fps,
             bitrateKbps, outW, outH, encoder, audioPipeName, _config.FragMs);
         using var ffmpegLifetime = TrackCleanup(ffmpeg.Dispose, "ffmpeg");
 
-        if (audioPipe is not null)
-        {
-            uint audioPid = _config.AudioPid;
-            _ = StartAudioAsync(audioPipe, audioPid, ct);
-        }
+        audioPipeline?.Start(_videoEpoch.Task, ct);
 
         var broadcaster = new Broadcaster
         {
@@ -285,7 +252,7 @@ public sealed class StreamSession
             Height = outH,
             Fps = fps,
             MaxViewers = _config.MaxViewers,
-            HasAudio = audioPipeName is not null,
+            HasAudio = audioPipeline is not null,
             StreamName = string.IsNullOrWhiteSpace(_config.StreamName)
                 ? Environment.MachineName : _config.StreamName.Trim(),
         };
@@ -526,71 +493,6 @@ public sealed class StreamSession
         CaptureProgressSnapshot? Capture,
         FrameWriterProgress Writer,
         long Fragments);
-
-    private async Task StartAudioAsync(NamedPipeServerStream audioPipe, uint audioPid,
-        CancellationToken ct)
-    {
-        long videoEpochTicks;
-        try
-        {
-            await audioPipe.WaitForConnectionAsync(ct).ConfigureAwait(false);
-            // Consume the epoch only after ffmpeg connects. Cancellation must win
-            // if teardown begins before the first video frame is enqueued.
-            videoEpochTicks = await _videoEpoch.Task.WaitAsync(ct).ConfigureAwait(false);
-        }
-        catch
-        {
-            // Connection failure and session teardown both leave audio inactive.
-            return;
-        }
-
-        void WriteToPipe(byte[] buf, int len)
-        {
-            try { audioPipe.Write(buf, 0, len); } catch { /* pipe closed on shutdown */ }
-        }
-
-        try
-        {
-            lock (_audioGate)
-            {
-                if (ct.IsCancellationRequested) return; // stopped while waiting for the epoch
-                _audioCapture = new Audio.ProcessAudioCapture(audioPid, videoEpochTicks, WriteToPipe);
-            }
-            Console.WriteLine($"[audio] capturing audio from process {audioPid}");
-        }
-        catch (Exception ex)
-        {
-            if (ct.IsCancellationRequested) return;
-            Console.Error.WriteLine($"[audio] process loopback failed ({ex.Message}); feeding silence instead.");
-            var silence = new byte[Audio.ProcessAudioCapture.SampleRate * Audio.ProcessAudioCapture.Channels * 4 / 100];
-            long fallbackStartTicks = Stopwatch.GetTimestamp();
-            long leadInFrames = Audio.ProcessAudioCapture.GetLeadInFrames(videoEpochTicks, fallbackStartTicks);
-            long leadInMs = (leadInFrames * 1000 + Audio.ProcessAudioCapture.SampleRate / 2)
-                / Audio.ProcessAudioCapture.SampleRate;
-            Console.WriteLine($"[audio] aligned to video timeline (+{leadInMs} ms lead-in silence)");
-
-            new Thread(() =>
-            {
-                const int bytesPerFrame = Audio.ProcessAudioCapture.Channels * 4;
-                long sentBytes = 0;
-                while (!ct.IsCancellationRequested)
-                {
-                    long elapsedTicks = Math.Max(0, Stopwatch.GetTimestamp() - fallbackStartTicks);
-                    long expectedFrames = leadInFrames
-                        + elapsedTicks * Audio.ProcessAudioCapture.SampleRate / Stopwatch.Frequency;
-                    long expectedBytes = expectedFrames * bytesPerFrame;
-                    while (sentBytes < expectedBytes)
-                    {
-                        int chunk = (int)Math.Min(silence.Length, expectedBytes - sentBytes);
-                        WriteToPipe(silence, chunk);
-                        sentBytes += chunk;
-                    }
-                    Thread.Sleep(5);
-                }
-            })
-            { IsBackground = true, Name = "audio-silence" }.Start();
-        }
-    }
 
     private string PacingLoop(ICaptureSource capture, FfmpegEncoder ffmpeg, FrameWriter writer,
         Broadcaster broadcaster, Task splitterTask, Task serverTask, int fps, CancellationToken ct)
