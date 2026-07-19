@@ -423,26 +423,26 @@ public sealed class MainForm : Form
         _rbMonitor.CheckedChanged += (_, _) => SelectSourceKind(SourceKind.Monitor, _rbMonitor);
         _rbCaptureDevice.CheckedChanged += (_, _) =>
             SelectSourceKind(SourceKind.CaptureDevice, _rbCaptureDevice);
-        _windowCombo.SelectedIndexChanged += (_, _) =>
+        _windowCombo.SelectedIndexChanged += (_, _) => RefreshSourceOptions();
+        _windowCombo.SelectionChangeCommitted += (_, _) =>
         {
-            _sourceSelection.SelectWindowIndex(_windowCombo.SelectedIndex);
+            bool changed = _sourceSelection.SelectWindowIndex(_windowCombo.SelectedIndex);
             RefreshSourceOptions();
+            if (changed && _rbWindow.Checked) ScheduleIdlePreviewRefresh();
         };
-        _windowCombo.SelectionChangeCommitted += (_, _) => { if (_rbWindow.Checked) ScheduleIdlePreviewRefresh(); };
-        _monitorCombo.SelectedIndexChanged += (_, _) =>
+        _monitorCombo.SelectedIndexChanged += (_, _) => RefreshSourceOptions();
+        _monitorCombo.SelectionChangeCommitted += (_, _) =>
         {
-            _sourceSelection.SelectMonitorIndex(_monitorCombo.SelectedIndex);
+            bool changed = _sourceSelection.SelectMonitorIndex(_monitorCombo.SelectedIndex);
             RefreshSourceOptions();
+            if (changed && _rbMonitor.Checked) ScheduleIdlePreviewRefresh();
         };
-        _monitorCombo.SelectionChangeCommitted += (_, _) => { if (_rbMonitor.Checked) ScheduleIdlePreviewRefresh(); };
-        _captureDeviceCombo.SelectedIndexChanged += (_, _) =>
-        {
-            _sourceSelection.SelectCaptureDeviceIndex(_captureDeviceCombo.SelectedIndex);
-            RefreshSourceOptions();
-        };
+        _captureDeviceCombo.SelectedIndexChanged += (_, _) => RefreshSourceOptions();
         _captureDeviceCombo.SelectionChangeCommitted += (_, _) =>
         {
-            if (_rbCaptureDevice.Checked) ScheduleIdlePreviewRefresh();
+            bool changed = _sourceSelection.SelectCaptureDeviceIndex(_captureDeviceCombo.SelectedIndex);
+            RefreshSourceOptions();
+            if (changed && _rbCaptureDevice.Checked) ScheduleIdlePreviewRefresh();
         };
         _audioCombo.SelectedIndexChanged += (_, _) => _sourceSelection.SelectAudioIndex(_audioCombo.SelectedIndex);
         _presetCombo.SelectedIndexChanged += (_, _) => RefreshSourceOptions();
@@ -1205,20 +1205,23 @@ public sealed class MainForm : Form
         rbMon.CheckedChanged += (_, _) => SelectDialogKind(SourceKind.Monitor, rbMon);
         rbCaptureDevice.CheckedChanged += (_, _) =>
             SelectDialogKind(SourceKind.CaptureDevice, rbCaptureDevice);
-        winCombo.SelectedIndexChanged += (_, _) =>
+        winCombo.SelectedIndexChanged += (_, _) => RefreshDlgSourceOptions();
+        winCombo.SelectionChangeCommitted += (_, _) =>
         {
-            dialogSources.SelectWindowIndex(winCombo.SelectedIndex);
-            RefreshDlgSourceOptions();
+            if (dialogSources.SelectWindowIndex(winCombo.SelectedIndex))
+                RefreshDlgSourceOptions();
         };
-        monCombo.SelectedIndexChanged += (_, _) =>
+        monCombo.SelectedIndexChanged += (_, _) => RefreshDlgSourceOptions();
+        monCombo.SelectionChangeCommitted += (_, _) =>
         {
-            dialogSources.SelectMonitorIndex(monCombo.SelectedIndex);
-            RefreshDlgSourceOptions();
+            if (dialogSources.SelectMonitorIndex(monCombo.SelectedIndex))
+                RefreshDlgSourceOptions();
         };
-        captureDeviceCombo.SelectedIndexChanged += (_, _) =>
+        captureDeviceCombo.SelectedIndexChanged += (_, _) => RefreshDlgSourceOptions();
+        captureDeviceCombo.SelectionChangeCommitted += (_, _) =>
         {
-            dialogSources.SelectCaptureDeviceIndex(captureDeviceCombo.SelectedIndex);
-            RefreshDlgSourceOptions();
+            if (dialogSources.SelectCaptureDeviceIndex(captureDeviceCombo.SelectedIndex))
+                RefreshDlgSourceOptions();
         };
         audioCombo.SelectedIndexChanged += (_, _) => dialogSources.SelectAudioIndex(audioCombo.SelectedIndex);
         presetCombo.SelectedIndexChanged += (_, _) => RefreshDlgSourceOptions();

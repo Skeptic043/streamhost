@@ -40,6 +40,40 @@ public sealed class SourceSelectionModelTests
         Assert.Equal(2, model.SelectedWindowIndex);
         Assert.Equal("DISPLAY-B", model.SelectedMonitor?.DeviceName);
         Assert.Equal(0, model.SelectedMonitorIndex);
+        Assert.False(model.SelectWindowIndex(2));
+        Assert.False(model.SelectMonitorIndex(0));
+    }
+
+    [Fact]
+    public void PickerSelectionReportsOnlyStableIdentityChanges()
+    {
+        var model = Model(
+            () =>
+            [
+                Window(1, "Alpha", 11),
+                Window(2, "Bravo", 22),
+            ],
+            () =>
+            [
+                Monitor(10, "DISPLAY-A"),
+                Monitor(20, "DISPLAY-B"),
+            ],
+            () =>
+            [
+                Device("device-a", "Alpha"),
+                Device("device-b", "Bravo"),
+            ]);
+        model.RefreshAll();
+
+        Assert.False(model.SelectWindowIndex(0));
+        Assert.True(model.SelectWindowIndex(1));
+        Assert.False(model.SelectWindowIndex(1));
+        Assert.False(model.SelectMonitorIndex(0));
+        Assert.True(model.SelectMonitorIndex(1));
+        Assert.False(model.SelectMonitorIndex(1));
+        Assert.False(model.SelectCaptureDeviceIndex(0));
+        Assert.True(model.SelectCaptureDeviceIndex(1));
+        Assert.False(model.SelectCaptureDeviceIndex(1));
     }
 
     [Fact]
@@ -64,6 +98,7 @@ public sealed class SourceSelectionModelTests
 
         Assert.Equal("device-b", model.SelectedCaptureDevice?.SymbolicLink);
         Assert.Equal(2, model.SelectedCaptureDeviceIndex);
+        Assert.False(model.SelectCaptureDeviceIndex(2));
     }
 
     [Fact]

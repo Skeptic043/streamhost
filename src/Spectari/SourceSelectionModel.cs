@@ -246,16 +246,39 @@ internal sealed class SourceSelectionModel
 
     internal void SelectKind(SourceKind kind) => Kind = kind;
 
-    internal void SelectWindowIndex(int index) =>
-        _selectedWindowHandle = index >= 0 && index < _windows.Count ? _windows[index].Handle : null;
+    internal bool SelectWindowIndex(int index)
+    {
+        IntPtr? selectedHandle = index >= 0 && index < _windows.Count
+            ? _windows[index].Handle
+            : null;
+        bool changed = selectedHandle != _selectedWindowHandle;
+        _selectedWindowHandle = selectedHandle;
+        return changed;
+    }
 
-    internal void SelectMonitorIndex(int index) =>
-        _selectedMonitorDeviceName = index >= 0 && index < _monitors.Count ? _monitors[index].DeviceName : null;
+    internal bool SelectMonitorIndex(int index)
+    {
+        string? selectedDeviceName = index >= 0 && index < _monitors.Count
+            ? _monitors[index].DeviceName
+            : null;
+        bool changed = selectedDeviceName is null || _selectedMonitorDeviceName is null
+            ? selectedDeviceName != _selectedMonitorDeviceName
+            : !MonitorIdentityEquals(selectedDeviceName, _selectedMonitorDeviceName);
+        _selectedMonitorDeviceName = selectedDeviceName;
+        return changed;
+    }
 
-    internal void SelectCaptureDeviceIndex(int index) =>
-        _selectedCaptureDeviceSymbolicLink = index >= 0 && index < _captureDevices.Count
+    internal bool SelectCaptureDeviceIndex(int index)
+    {
+        string? selectedSymbolicLink = index >= 0 && index < _captureDevices.Count
             ? _captureDevices[index].SymbolicLink
             : null;
+        bool changed = selectedSymbolicLink is null || _selectedCaptureDeviceSymbolicLink is null
+            ? selectedSymbolicLink != _selectedCaptureDeviceSymbolicLink
+            : !CaptureDeviceIdentityEquals(selectedSymbolicLink, _selectedCaptureDeviceSymbolicLink);
+        _selectedCaptureDeviceSymbolicLink = selectedSymbolicLink;
+        return changed;
+    }
 
     internal void SelectAudioIndex(int index)
     {
