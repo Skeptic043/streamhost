@@ -1079,7 +1079,7 @@ public sealed class MainForm : Form
     /// encoder, and audio pickers, prefilled from the current selections. OK writes the
     /// choices back to the main controls and goes through the normal switch
     /// (or plain start when idle), so both paths stay one code path.</summary>
-    private void ShowSwitchDialog()
+    private async void ShowSwitchDialog()
     {
         if (_streamController.IsStopping) return;
 
@@ -1240,7 +1240,26 @@ public sealed class MainForm : Form
         ApplyDarkTheme(dlg);
         ok.BackColor = AccentDark;
 
-        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        var completion = new TaskCompletionSource<DialogResult>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        void Complete(DialogResult result)
+        {
+            if (!completion.TrySetResult(result)) return;
+            dlg.Hide();
+        }
+        ok.Click += (_, _) => Complete(DialogResult.OK);
+        cancel.Click += (_, _) => Complete(DialogResult.Cancel);
+        dlg.FormClosing += (_, e) =>
+        {
+            e.Cancel = true;
+            Complete(DialogResult.Cancel);
+        };
+
+        this.Enabled = false;
+        dlg.Show(this);
+        DialogResult result = await completion.Task;
+        this.Enabled = true;
+        if (result != DialogResult.OK) return;
 
         // The dialog has only held descriptions so far. Release any idle capture
         // source before its accepted pick is applied to the main controls and
