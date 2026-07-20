@@ -101,7 +101,7 @@ public sealed class MainForm : Form
         // A missing value deserializes to 0, which matches no real port, so LAN
         // stays off until the next successful Open port on that port.
         public int AllowLanPort { get; set; }
-        // Canonical four-component version dismissed from the quiet update row.
+        // Canonical four-component version dismissed from the update notice.
         public string SkipUpdateVersion { get; set; } = "";
     }
 
@@ -139,7 +139,8 @@ public sealed class MainForm : Form
     private readonly Label _statusLabel = new() { Text = "Not streaming.", AutoSize = true };
     private readonly TableLayoutPanel _updatePanel = new()
     {
-        Dock = DockStyle.Top, Height = 36, Visible = false, BackColor = Card,
+        Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+        Height = 36, Visible = false, BackColor = Card,
         ColumnCount = 3, Padding = new Padding(12, 4, 8, 4),
     };
     private readonly Label _updateLabel = new() { AutoSize = true, ForeColor = Fg, Anchor = AnchorStyles.Left };
@@ -1926,6 +1927,8 @@ public sealed class MainForm : Form
             _availableUpdateVersion = canonical;
             int displayParts = remoteVersion.Revision != 0 ? 4 : remoteVersion.Build != 0 ? 3 : 2;
             _updateLabel.Text = $"Spectari v{remoteVersion.ToString(displayParts)} is available.";
+            _updatePanel.SetBounds(0, 0, ClientSize.Width, _updatePanel.Height);
+            _updatePanel.BringToFront();
             _updatePanel.Visible = true;
         }
         catch
