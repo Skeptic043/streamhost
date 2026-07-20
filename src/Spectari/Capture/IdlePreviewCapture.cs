@@ -263,9 +263,13 @@ internal sealed class IdlePreviewCapture : IDisposable
             progress = timedOut.Resources.GetProgressSnapshot();
         }
 
+        _ = AbandonedPreviewCleanup.Start(
+            timedOut.Resources,
+            "stuck poll teardown",
+            Console.WriteLine);
         Console.WriteLine(
             $"[preview] frame readback stuck for 5 seconds; {FormatCaptureProgress(progress)}; " +
-            "capture abandoned; preview disabled.");
+            "readback worker abandoned; capture retirement started in background; preview disabled.");
         return new IdlePreviewPollResult(IdlePreviewPollState.Unavailable);
     }
 
@@ -451,12 +455,17 @@ internal sealed class IdlePreviewCapture : IDisposable
 
             if (!poll.Task.IsCompleted)
             {
-                if (poll.Abandon())
+                bool firstAbandon = poll.Abandon();
+                CaptureProgressSnapshot progress = firstAbandon
+                    ? resources.GetProgressSnapshot()
+                    : default;
+                _ = AbandonedPreviewCleanup.Start(resources, action, Console.WriteLine);
+                if (firstAbandon)
                 {
-                    CaptureProgressSnapshot progress = resources.GetProgressSnapshot();
                     Console.WriteLine(
                         $"[preview] frame readback stuck for 5 seconds during {action}; " +
-                        $"{FormatCaptureProgress(progress)}; capture abandoned.");
+                        $"{FormatCaptureProgress(progress)}; readback worker abandoned; " +
+                        "capture retirement started in background.");
                 }
                 return false;
             }
