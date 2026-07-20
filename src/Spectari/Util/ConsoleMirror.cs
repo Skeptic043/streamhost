@@ -36,6 +36,7 @@ public static class ConsoleMirror
         _originalError = Console.Error;
         Console.SetOut(new TeeWriter(_originalOut));
         Console.SetError(new TeeWriter(_originalError));
+        WriteDiagnosticLine(DiagnosticLogEventText.AppStarted(AppVersion.Current));
         if (LogFilePath is not null)
             WriteTransientLine($"[log] writing to {LogFilePath}");
     }
@@ -47,6 +48,13 @@ public static class ConsoleMirror
         string safeLine = BundleScrubber.Scrub(line);
         (_originalOut ?? Console.Out).WriteLine(safeLine);
         PublishSafeLine(safeLine, showToOperator: true);
+    }
+
+    internal static void WriteDiagnosticLine(string line)
+    {
+        string safeLine = BundleScrubber.Scrub(line);
+        (_originalOut ?? Console.Out).WriteLine(safeLine);
+        PublishSafeLine(safeLine, showToOperator: false);
     }
 
     /// <summary>Writes a component event after applying the shared audience

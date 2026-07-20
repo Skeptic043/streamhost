@@ -1842,7 +1842,7 @@ public sealed class MainForm : Form
                 return (tailnet, gpus, ffmpeg, gpu, gpuSource, expected);
             });
             var sb = new System.Text.StringBuilder();
-            sb.AppendLine($"Spectari {AppVersion()}");
+            sb.AppendLine($"Spectari {AppVersion.Current}");
             sb.AppendLine($"Windows:  {Environment.OSVersion.VersionString}");
             sb.AppendLine($"GPUs:     {diagnostics.gpus}");
             sb.AppendLine($"ffmpeg:   {diagnostics.ffmpeg.version}");
@@ -1915,7 +1915,7 @@ public sealed class MainForm : Form
             CancellationToken token = _updateCheckCts.Token;
             string? remoteTag = await UpdateChecker.GetLatestReleaseTagAsync(token);
             if (token.IsCancellationRequested || IsDisposed || Disposing
-                || !UpdateChecker.IsRemoteVersionNewer(AppVersion(), remoteTag))
+                || !UpdateChecker.IsRemoteVersionNewer(AppVersion.Current, remoteTag))
                 return;
 
             string? canonical = UpdateChecker.CanonicalVersion(remoteTag);
@@ -1957,11 +1957,6 @@ public sealed class MainForm : Form
         _updatePanel.Visible = false;
         SaveSettings();
     }
-
-    internal static string AppVersion() =>
-        System.Reflection.Assembly.GetExecutingAssembly()
-            .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
-            is [System.Reflection.AssemblyInformationalVersionAttribute a, ..] ? a.InformationalVersion : "dev";
 
     /// <summary>One-line description of the running session (or "not streaming"),
     /// shared by the support bundle and the crash log.</summary>

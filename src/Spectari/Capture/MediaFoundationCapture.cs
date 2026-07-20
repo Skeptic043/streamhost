@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using Spectari.Util;
 
 namespace Spectari.Capture;
 
@@ -297,6 +298,8 @@ internal sealed class MediaFoundationCapture : ICaptureSource, ICaptureDiagnosti
                     ? unchecked((int)stride)
                     : checked(Width * 4);
             _latestFrame = GC.AllocateUninitializedArray<byte>(checked(Width * Height * 4));
+            ConsoleMirror.WriteDiagnosticLine(
+                DiagnosticLogEventText.CaptureDeviceNativeMode(selected));
         }
         finally
         {

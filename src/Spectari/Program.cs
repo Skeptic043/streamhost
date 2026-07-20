@@ -161,7 +161,7 @@ internal static class Program
             var w = Console.Error;
             var t = Thread.CurrentThread;
             w.WriteLine($"[crash] {(fatal ? "FATAL" : "unhandled")} on {origin} thread '{t.Name ?? "?"}' (#{Environment.CurrentManagedThreadId})");
-            w.WriteLine($"[crash] Spectari {MainForm.AppVersion()} on {Environment.OSVersion.VersionString}");
+            w.WriteLine($"[crash] Spectari {Util.AppVersion.Current} on {Environment.OSVersion.VersionString}");
             w.WriteLine($"[crash] {Ui.AppRunContext.Current?.DescribeState() ?? "no window context"}");
             w.WriteLine($"[crash] {ex?.ToString() ?? "(no exception object)"}");
         }
