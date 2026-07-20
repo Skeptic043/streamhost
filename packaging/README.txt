@@ -113,3 +113,7 @@ and encoder info on the clipboard. Paste it when reporting a problem.
 License: free for personal and other noncommercial use under PolyForm
 Noncommercial 1.0.0 (see LICENSE.txt). Commercial use is not included;
 contact the maintainer through GitHub regarding commercial licensing.
+
+This package includes an unmodified FFmpeg executable as separate software
+under GPLv3 or later. See FFMPEG-LICENSE.txt and THIRD-PARTY-NOTICES.txt for
+the license, exact source link, binary hash, and build-provider provenance.

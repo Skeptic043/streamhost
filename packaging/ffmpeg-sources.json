@@ -1,0 +1,14 @@
+{
+  "builds": [
+    {
+      "sha256": "09948D4CDD0650DA6FF5A87577469F2A218DC2615AE379F8F734D24C49DE0F73",
+      "version": "8.1.1-full_build-www.gyan.dev",
+      "license": "GPL-3.0-or-later",
+      "licenseFile": "licenses/FFmpeg-GPLv3.txt",
+      "sourceUrl": "https://github.com/Skeptic043/spectari/releases/download/v0.18/ffmpeg-8.1.1-source-239f2c733d.zip",
+      "sourceSha256": "572FF211A22A43AF06962A9D111115BADF7BD37827F2C2B90D5D1C84AF8002C4",
+      "sourceCommit": "239f2c733de417201d7ad3b3b8b0d9b63285b2b1",
+      "providerUrl": "https://github.com/GyanD/codexffmpeg/releases/tag/8.1.1"
+    }
+  ]
+}

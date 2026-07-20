@@ -60,6 +60,15 @@ foreach ($query in $requiredCapabilities.Keys) {
 }
 
 $ffmpegHash = (Get-FileHash dist/Spectari/ffmpeg.exe -Algorithm SHA256).Hash
+$sourceManifestPath = Join-Path $PSScriptRoot "packaging/ffmpeg-sources.json"
+$sourceManifest = Get-Content -LiteralPath $sourceManifestPath -Raw | ConvertFrom-Json
+$ffmpegSource = @($sourceManifest.builds) |
+    Where-Object { $_.sha256 -eq $ffmpegHash } |
+    Select-Object -First 1
+if (-not $ffmpegSource) {
+    throw "No corresponding-source mapping exists for ffmpeg SHA256 $ffmpegHash; refusing to package it."
+}
+
 $buildDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss 'UTC'")
 $buildInfo = @(
     "Spectari version: $Version"
@@ -67,6 +76,9 @@ $buildInfo = @(
     "Build date: $buildDate"
     "ffmpeg version: $ffmpegVersionLine"
     "ffmpeg SHA256: $ffmpegHash"
+    "ffmpeg corresponding source: $($ffmpegSource.sourceUrl)"
+    "ffmpeg source SHA256: $($ffmpegSource.sourceSha256)"
+    "ffmpeg source commit: $($ffmpegSource.sourceCommit)"
 )
 if (-not [string]::IsNullOrWhiteSpace($ffmpegBuildconf)) {
     $buildInfo += "ffmpeg buildconf: $ffmpegBuildconf"
@@ -97,6 +109,25 @@ if ($ffmpegBuildconf -match '(?:^|\s)--enable-gpl(?:\s|$)') {
     $isGpl = $false
 }
 
+$expectedLicense = if ($isGpl -and $ffmpegBuildconf -match '(?:^|\s)--enable-version3(?:\s|$)') {
+    "GPL-3.0-or-later"
+} elseif ($isGpl) {
+    "GPL-2.0-or-later"
+} elseif ($ffmpegBuildconf -match '(?:^|\s)--enable-version3(?:\s|$)') {
+    "LGPL-3.0-or-later"
+} else {
+    "LGPL-2.1-or-later"
+}
+if ($ffmpegSource.license -ne $expectedLicense) {
+    throw "The ffmpeg source mapping says '$($ffmpegSource.license)' but the binary requires '$expectedLicense'."
+}
+
+$ffmpegLicensePath = Join-Path $PSScriptRoot ("packaging/" + $ffmpegSource.licenseFile)
+if (-not (Test-Path -LiteralPath $ffmpegLicensePath)) {
+    throw "The mapped ffmpeg license file is missing: $ffmpegLicensePath"
+}
+Copy-Item -LiteralPath $ffmpegLicensePath -Destination dist/Spectari/FFMPEG-LICENSE.txt -Force
+
 $notice = @(
     "Spectari third-party notices"
     ""
@@ -110,7 +141,12 @@ $notice = @(
 )
 if ($isGpl) {
     $notice += ""
-    $notice += "The corresponding FFmpeg source code is available from ffmpeg.org and from the build provider."
+    $notice += "The FFmpeg source corresponding to this build is available here:"
+    $notice += $ffmpegSource.sourceUrl
+    $notice += "Source archive SHA256: $($ffmpegSource.sourceSha256)"
+    $notice += "FFmpeg source commit: $($ffmpegSource.sourceCommit)"
+    $notice += "Build provider and configuration: $($ffmpegSource.providerUrl)"
+    $notice += "The full FFmpeg license text is in FFMPEG-LICENSE.txt."
 }
 $notice += ""
 $notice += "FFmpeg project: https://ffmpeg.org"

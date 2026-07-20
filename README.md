@@ -200,3 +200,8 @@ Spectari is a hobby project. If it's useful and you feel like saying thanks:
 Spectari is free for personal and other noncommercial use under
 [PolyForm Noncommercial 1.0.0](LICENSE). Commercial use is not included;
 contact the maintainer through GitHub about commercial licensing.
+
+Release packages also include an unmodified FFmpeg executable as separate
+software under GPLv3 or later. The exact source, license, binary hash, and
+build-provider provenance are recorded in
+[the FFmpeg source manifest](packaging/ffmpeg-sources.json).
