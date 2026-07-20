@@ -31,6 +31,7 @@ internal sealed class WindowReattachCapture : ICaptureSource, ICaptureDiagnostic
 
     private ScreenCapture? _active;
     private WindowIdentity _activeIdentity;
+    private WindowLossGate _lossGate = new();
     private WindowReattachPolicy? _policy;
     private CaptureProgressSnapshot _completedProgress;
     private Exception? _fatalError;
@@ -187,10 +188,40 @@ internal sealed class WindowReattachCapture : ICaptureSource, ICaptureDiagnostic
 
     private void OnTargetClosed(ScreenCapture closedCapture)
     {
+        WindowLossGate lossGate;
         lock (_gate)
         {
             if (_disposed || _waiting || !ReferenceEquals(_active, closedCapture)) return;
+            lossGate = _lossGate;
         }
+
+        OnTargetLost(closedCapture, lossGate, WindowLossReason.CaptureItemClosed);
+    }
+
+    private void OnTargetLost(
+        ScreenCapture lostCapture,
+        WindowLossGate lossGate,
+        WindowLossReason reason)
+    {
+        lock (_gate)
+        {
+            if (_disposed
+                || _waiting
+                || !ReferenceEquals(_active, lostCapture)
+                || !ReferenceEquals(_lossGate, lossGate)
+                || !lossGate.TryClaim(reason))
+            {
+                return;
+            }
+        }
+
+        string reasonText = reason switch
+        {
+            WindowLossReason.CaptureItemClosed => "capture-item closed event",
+            WindowLossReason.InvalidWindowHandle => "window handle validity check",
+            _ => throw new ArgumentOutOfRangeException(nameof(reason)),
+        };
+        Console.WriteLine($"[window-reattach] window loss detected by {reasonText}.");
 
         List<WindowDescription> windowsAtLoss;
         try
@@ -203,7 +234,13 @@ internal sealed class WindowReattachCapture : ICaptureSource, ICaptureDiagnostic
                 "window reattach could not snapshot the windows present at capture loss", ex);
             lock (_gate)
             {
-                if (_fatalError is not null) return;
+                if (_disposed
+                    || _fatalError is not null
+                    || !ReferenceEquals(_active, lostCapture)
+                    || !ReferenceEquals(_lossGate, lossGate))
+                {
+                    return;
+                }
                 _fatalError = failure;
             }
             Console.Error.WriteLine(
@@ -214,10 +251,16 @@ internal sealed class WindowReattachCapture : ICaptureSource, ICaptureDiagnostic
 
         lock (_gate)
         {
-            if (_disposed || _waiting || !ReferenceEquals(_active, closedCapture)) return;
+            if (_disposed
+                || _waiting
+                || !ReferenceEquals(_active, lostCapture)
+                || !ReferenceEquals(_lossGate, lossGate))
+            {
+                return;
+            }
 
             _waitingVersion = CurrentVersionLocked() + 1;
-            AccumulateProgress(closedCapture);
+            AccumulateProgress(lostCapture);
             _active = null;
             _waiting = true;
             _policy = new WindowReattachPolicy(
@@ -228,10 +271,10 @@ internal sealed class WindowReattachCapture : ICaptureSource, ICaptureDiagnostic
             _candidateEnumerationFailureLogged = false;
         }
 
-        closedCapture.TargetClosed -= OnTargetClosed;
-        RetireInBackground(closedCapture, "closed capture retirement");
+        lostCapture.TargetClosed -= OnTargetClosed;
+        RetireInBackground(lostCapture, "lost capture retirement");
         Console.WriteLine(
-            "[window-reattach] captured window closed; the stream remains live while waiting for the application to return.");
+            "[window-reattach] the stream remains live while waiting for the application to return.");
         _stateChanged.Set();
     }
 
@@ -240,8 +283,26 @@ internal sealed class WindowReattachCapture : ICaptureSource, ICaptureDiagnostic
         CancellationToken ct = _cts.Token;
         while (!ct.IsCancellationRequested)
         {
+            ScreenCapture? active;
+            WindowIdentity activeIdentity;
+            WindowLossGate? lossGate;
             WindowReattachPolicy? policy;
-            lock (_gate) policy = _waiting ? _policy : null;
+            lock (_gate)
+            {
+                active = _waiting ? null : _active;
+                activeIdentity = _activeIdentity;
+                lossGate = active is null ? null : _lossGate;
+                policy = _waiting ? _policy : null;
+            }
+
+            if (active is not null && lossGate is not null)
+            {
+                if (!IsWindow(activeIdentity.Handle))
+                    OnTargetLost(active, lossGate, WindowLossReason.InvalidWindowHandle);
+                WaitForWork(CandidatePollMs, ct);
+                continue;
+            }
+
             if (policy is null)
             {
                 WaitForWork(Timeout.Infinite, ct);
@@ -326,6 +387,7 @@ internal sealed class WindowReattachCapture : ICaptureSource, ICaptureDiagnostic
                 {
                     _active = replacement;
                     _activeIdentity = WindowReattachPolicy.IdentityOf(candidate);
+                    _lossGate = new WindowLossGate();
                     _activeVersionBase = _waitingVersion;
                     _waiting = false;
                     _policy = null;
@@ -497,6 +559,10 @@ internal sealed class WindowReattachCapture : ICaptureSource, ICaptureDiagnostic
 
     private static string SingleLine(string value) =>
         value.Replace('\r', ' ').Replace('\n', ' ');
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindow(IntPtr hWnd);
 
     public void Dispose()
     {
