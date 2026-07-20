@@ -222,8 +222,7 @@ public sealed class StreamSession
             outH = capture.Height & ~1;
         }
 
-        string encoder = FfmpegEncoder.PickEncoder(
-            capture.GpuVendorId, capture.AdapterLuid, capture.DriverVersion, _config.Encoder);
+        string encoder = EncoderAdapterResolver.Select(capture, captureDeviceSelected, _config.Encoder);
         ActiveEncoder = encoder;
         OutputWidth = outW;
         OutputHeight = outH;

@@ -145,6 +145,18 @@ public sealed class FfmpegEncoder : IDisposable
     /// InvalidateProbeCache so the path is never spelled out in two places.</summary>
     private static string CachePath => Spectari.Util.AppPaths.EncoderCacheFile;
 
+    internal static string? ReadCachedProbeToken()
+    {
+        try
+        {
+            return File.Exists(CachePath) ? File.ReadAllText(CachePath).Trim() : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     /// <summary>Drops the cached "passed" verdict so the next auto-mode launch
     /// re-probes the GPU encoder instead of trusting a token a live stall just
     /// disproved. Best-effort: a missing or unwritable cache just means the
@@ -177,14 +189,10 @@ public sealed class FfmpegEncoder : IDisposable
         // Cache a PASSED probe per GPU so startup skips the 1-2s self-test.
         // Failures are deliberately not cached - a driver hiccup shouldn't
         // condemn the machine to CPU encoding forever.
-        string cachePath = CachePath;
         string? token = ExpectedProbeToken(gpuVendorId, adapterLuid, driverVersion);
-        try
-        {
-            if (token is not null && File.Exists(cachePath) && File.ReadAllText(cachePath).Trim() == token)
-                return preferred;
-        }
-        catch { }
+        if (token is not null &&
+            string.Equals(ReadCachedProbeToken(), token, StringComparison.Ordinal))
+            return preferred;
 
         if (!ProbeEncoder(preferred))
         {
@@ -196,13 +204,16 @@ public sealed class FfmpegEncoder : IDisposable
         {
             if (token is not null)
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
-                File.WriteAllText(cachePath, token);
+                Directory.CreateDirectory(Path.GetDirectoryName(CachePath)!);
+                File.WriteAllText(CachePath, token);
             }
         }
         catch { }
         return preferred;
     }
+
+    internal static bool HasHardwareEncoder(uint gpuVendorId) =>
+        PreferredEncoder(gpuVendorId) != "libx264";
 
     /// <summary>The hardware encoder this GPU vendor prefers, or "libx264" for
     /// unknown/other vendors. Single source of truth for both PickEncoder and the
