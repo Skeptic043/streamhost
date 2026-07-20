@@ -32,45 +32,4 @@ public sealed class CaptureDevicePolicyTests
             });
     }
 
-    [Fact]
-    public void PreferredFormatBalancesPixelRateAndFrameRateBelowTheUiCeiling()
-    {
-        CaptureDeviceFormat[] formats =
-        [
-            Format(CaptureDevicePixelFormat.Mjpeg, 3840, 2160, 15),
-            Format(CaptureDevicePixelFormat.Yuy2, 1280, 720, 120),
-            Format(CaptureDevicePixelFormat.Nv12, 1920, 1080, 60),
-            Format(CaptureDevicePixelFormat.Mjpeg, 1920, 1080, 30),
-        ];
-
-        CaptureDeviceFormat? selected = CaptureDevicePolicy.ChoosePreferredFormat(formats);
-
-        Assert.NotNull(selected);
-        Assert.Equal(CaptureDevicePixelFormat.Nv12, selected.PixelFormat);
-        Assert.Equal(1920, selected.Width);
-        Assert.Equal(1080, selected.Height);
-        Assert.Equal(60, selected.RoundedFramesPerSecond);
-    }
-
-    [Fact]
-    public void PreferredFormatUsesUncompressedSubtypeOrderForEquivalentModes()
-    {
-        CaptureDeviceFormat[] formats =
-        [
-            Format(CaptureDevicePixelFormat.Mjpeg, 1920, 1080, 60),
-            Format(CaptureDevicePixelFormat.Yuy2, 1920, 1080, 60),
-            Format(CaptureDevicePixelFormat.Nv12, 1920, 1080, 60),
-        ];
-
-        CaptureDeviceFormat? selected = CaptureDevicePolicy.ChoosePreferredFormat(formats);
-
-        Assert.NotNull(selected);
-        Assert.Equal(CaptureDevicePixelFormat.Nv12, selected.PixelFormat);
-    }
-
-    private static CaptureDeviceFormat Format(
-        CaptureDevicePixelFormat pixelFormat,
-        int width,
-        int height,
-        uint fps) => new(pixelFormat, width, height, fps, 1);
 }

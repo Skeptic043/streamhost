@@ -239,7 +239,7 @@ internal sealed class MediaFoundationCapture : ICaptureSource, ICaptureDiagnosti
                     MediaFoundationInterop.Release(ref mediaType);
             }
 
-            CaptureDeviceFormat? selected = CaptureDevicePolicy.ChoosePreferredFormat(
+            CaptureDeviceFormat? selected = CaptureDeviceFormatPolicy.ChoosePreferredFormat(
                 nativeTypes.Select(item => item.Format));
             if (selected is null)
             {

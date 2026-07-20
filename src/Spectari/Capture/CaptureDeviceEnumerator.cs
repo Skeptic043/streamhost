@@ -6,31 +6,8 @@ internal sealed record CaptureDeviceDescription(string SymbolicLink, string Frie
 
 internal sealed record CaptureDeviceDisplayItem(CaptureDeviceDescription Device, string DisplayName);
 
-internal enum CaptureDevicePixelFormat
-{
-    Nv12,
-    Yuy2,
-    Mjpeg,
-}
-
-internal sealed record CaptureDeviceFormat(
-    CaptureDevicePixelFormat PixelFormat,
-    int Width,
-    int Height,
-    uint FrameRateNumerator,
-    uint FrameRateDenominator)
-{
-    internal double FramesPerSecond => FrameRateDenominator == 0
-        ? 0
-        : (double)FrameRateNumerator / FrameRateDenominator;
-
-    internal int RoundedFramesPerSecond => Math.Max(1, (int)Math.Round(FramesPerSecond));
-}
-
 internal static class CaptureDevicePolicy
 {
-    private const double PreferredFrameRateCeiling = 60.5;
-
     internal static IReadOnlyList<CaptureDeviceDisplayItem> PrepareDisplayItems(
         IEnumerable<CaptureDeviceDescription> devices)
     {
@@ -56,41 +33,8 @@ internal static class CaptureDevicePolicy
         return items;
     }
 
-    internal static CaptureDeviceFormat? ChoosePreferredFormat(IEnumerable<CaptureDeviceFormat> formats)
-    {
-        List<CaptureDeviceFormat> supported = formats
-            .Where(format => format.Width > 0 && format.Height > 0 && format.FramesPerSecond > 0)
-            .ToList();
-        if (supported.Count == 0) return null;
-
-        List<CaptureDeviceFormat> withinCeiling = supported
-            .Where(format => format.FramesPerSecond <= PreferredFrameRateCeiling)
-            .ToList();
-        IEnumerable<CaptureDeviceFormat> candidates = withinCeiling.Count > 0 ? withinCeiling : supported;
-
-        return candidates
-            .OrderByDescending(PixelRate)
-            .ThenByDescending(format => format.FramesPerSecond)
-            .ThenByDescending(format => (long)format.Width * format.Height)
-            .ThenBy(format => PixelFormatOrder(format.PixelFormat))
-            .ThenByDescending(format => format.Width)
-            .ThenByDescending(format => format.Height)
-            .First();
-    }
-
     private static string DisplayBaseName(CaptureDeviceDescription device) =>
         string.IsNullOrWhiteSpace(device.FriendlyName) ? "Capture device" : device.FriendlyName.Trim();
-
-    private static double PixelRate(CaptureDeviceFormat format) =>
-        (double)format.Width * format.Height * format.FramesPerSecond;
-
-    private static int PixelFormatOrder(CaptureDevicePixelFormat format) => format switch
-    {
-        CaptureDevicePixelFormat.Nv12 => 0,
-        CaptureDevicePixelFormat.Yuy2 => 1,
-        CaptureDevicePixelFormat.Mjpeg => 2,
-        _ => int.MaxValue,
-    };
 }
 
 internal static class CaptureDeviceEnumerator
