@@ -16,7 +16,7 @@ namespace Spectari.Capture;
 /// texture; TryReadFrame does a staging readback of that frame on demand, so the
 /// caller controls the output frame rate independent of the capture rate.
 /// </summary>
-public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics
+public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics, IGpuTextureCaptureSource
 {
     private const DirectXPixelFormat CaptureFormat = DirectXPixelFormat.B8G8R8A8UIntNormalized;
     private const int CaptureBufferCount = 2;
@@ -58,6 +58,7 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics
     private readonly GraphicsCaptureSession _session;
     private readonly ID3D11Texture2D _latest;
     private readonly ID3D11RenderTargetView _latestRtv;
+    private readonly GpuTextureCaptureFrame _gpuTextureFrame;
     private ID3D11Texture2D? _scaleSource;
     private ID3D11ShaderResourceView? _scaleSourceView;
     private ID3D11VertexShader? _scaleVertexShader;
@@ -288,6 +289,13 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics
         trace?.Begin("ID3D11Device.CreateRenderTargetView");
         _latestRtv = _device.CreateRenderTargetView(_latest, null);
         trace?.Complete("ID3D11Device.CreateRenderTargetView");
+        _gpuTextureFrame = new GpuTextureCaptureFrame(
+            _device,
+            _context,
+            Width,
+            Height,
+            AdapterLuid,
+            TryCopyLatestTexture);
 
         // Staging textures are CPU-readback only and can't carry a bind flag.
         desc.Usage = ResourceUsage.Staging;
@@ -701,6 +709,42 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics
         finally
         {
             Volatile.Write(ref _readbackStage, (int)ReadbackStage.Idle);
+        }
+    }
+
+    GpuTextureCaptureStatus IGpuTextureCaptureSource.TryGetGpuTexture(
+        out GpuTextureCaptureFrame? frame)
+    {
+        if (!_hasFrame || _disposing)
+        {
+            frame = null;
+            return GpuTextureCaptureStatus.Unavailable;
+        }
+
+        frame = _gpuTextureFrame;
+        return GpuTextureCaptureStatus.Available;
+    }
+
+    private bool TryCopyLatestTexture(ID3D11Texture2D destination)
+    {
+        if (!_hasFrame || _disposing)
+            return false;
+
+        Texture2DDescription description = destination.Description;
+        if (description.Width != (uint)Width || description.Height != (uint)Height ||
+            description.Format != Format.B8G8R8A8_UNorm)
+        {
+            throw new ArgumentException(
+                "GPU capture destination must match the BGRA capture texture.",
+                nameof(destination));
+        }
+
+        lock (_gate)
+        {
+            if (_disposing || !_hasFrame)
+                return false;
+            _context.CopyResource(destination, _latest);
+            return true;
         }
     }
 

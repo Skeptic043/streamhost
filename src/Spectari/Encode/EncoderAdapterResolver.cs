@@ -8,13 +8,35 @@ internal readonly record struct EncoderAdapterIdentity(
     string Luid,
     string DriverVersion);
 
+internal readonly record struct RawVideoEncoderSelection(
+    string Encoder,
+    EncoderAdapterIdentity Adapter);
+
 internal static class EncoderAdapterResolver
 {
     internal static string Select(
         ICaptureSource capture,
         bool captureDeviceSelected,
         string? requested) =>
-        Select(
+        Resolve(
+            new EncoderAdapterIdentity(
+                capture.GpuVendorId,
+                capture.AdapterLuid,
+                capture.DriverVersion),
+            captureDeviceSelected,
+            requested).Encoder;
+
+    internal static string Select(
+        EncoderAdapterIdentity sourceAdapter,
+        bool captureDeviceSelected,
+        string? requested) =>
+        Resolve(sourceAdapter, captureDeviceSelected, requested).Encoder;
+
+    internal static RawVideoEncoderSelection Resolve(
+        ICaptureSource capture,
+        bool captureDeviceSelected,
+        string? requested) =>
+        Resolve(
             new EncoderAdapterIdentity(
                 capture.GpuVendorId,
                 capture.AdapterLuid,
@@ -22,7 +44,7 @@ internal static class EncoderAdapterResolver
             captureDeviceSelected,
             requested);
 
-    internal static string Select(
+    internal static RawVideoEncoderSelection Resolve(
         EncoderAdapterIdentity sourceAdapter,
         bool captureDeviceSelected,
         string? requested)
@@ -31,11 +53,13 @@ internal static class EncoderAdapterResolver
         if (captureDeviceSelected && (string.IsNullOrEmpty(requested) || requested == "auto"))
             adapter = ResolveCaptureDeviceAdapter() ?? sourceAdapter;
 
-        return FfmpegEncoder.PickEncoder(
-            adapter.VendorId,
-            adapter.Luid,
-            adapter.DriverVersion,
-            requested);
+        return new RawVideoEncoderSelection(
+            FfmpegEncoder.PickEncoder(
+                adapter.VendorId,
+                adapter.Luid,
+                adapter.DriverVersion,
+                requested),
+            adapter);
     }
 
     internal static EncoderAdapterIdentity? ChooseCaptureDeviceAdapter(
@@ -80,7 +104,7 @@ internal static class EncoderAdapterResolver
                 ffmpeg.Value));
     }
 
-    private static IReadOnlyList<EncoderAdapterIdentity> EnumerateHardwareAdapters()
+    internal static IReadOnlyList<EncoderAdapterIdentity> EnumerateHardwareAdapters()
     {
         var adapters = new List<EncoderAdapterIdentity>();
         try

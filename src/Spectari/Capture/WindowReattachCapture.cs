@@ -10,7 +10,7 @@ namespace Spectari.Capture;
 /// Keeps one window-share canvas alive while its application is absent, then
 /// replaces the WGC source with a newly appeared window from that application.
 /// </summary>
-internal sealed class WindowReattachCapture : ICaptureSource, ICaptureDiagnostics
+internal sealed class WindowReattachCapture : ICaptureSource, ICaptureDiagnostics, IGpuTextureCaptureSource
 {
     private const int CandidatePollMs = 500;
     private const int CandidateFirstFrameMs = 5000;
@@ -184,6 +184,29 @@ internal sealed class WindowReattachCapture : ICaptureSource, ICaptureDiagnostic
         }
 
         return active.TryReadFrame(buffer);
+    }
+
+    GpuTextureCaptureStatus IGpuTextureCaptureSource.TryGetGpuTexture(
+        out GpuTextureCaptureFrame? frame)
+    {
+        ScreenCapture? active;
+        lock (_gate)
+        {
+            if (_waiting)
+            {
+                frame = null;
+                return GpuTextureCaptureStatus.CpuFrameOnly;
+            }
+            active = _active;
+        }
+
+        if (active is null)
+        {
+            frame = null;
+            return GpuTextureCaptureStatus.Unavailable;
+        }
+
+        return ((IGpuTextureCaptureSource)active).TryGetGpuTexture(out frame);
     }
 
     private void OnTargetClosed(ScreenCapture closedCapture)

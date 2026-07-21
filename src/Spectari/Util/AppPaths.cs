@@ -13,6 +13,8 @@ public static class AppPaths
 
     public static string SettingsFile { get; } = Path.Combine(RootDirectory, "settings.json");
     public static string EncoderCacheFile { get; } = Path.Combine(RootDirectory, "encoder.cache");
+    public static string HardwareEncoderCacheFile { get; } =
+        Path.Combine(RootDirectory, "mf-encoder.cache");
     public static string LogsDirectory { get; } = Path.Combine(RootDirectory, "logs");
     public static string PeersFile { get; } = Path.Combine(RootDirectory, "peers.json");
     public static string WebView2UserDataDirectory { get; } = Path.Combine(RootDirectory, "webview2");

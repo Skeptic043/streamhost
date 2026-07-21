@@ -228,7 +228,15 @@ public sealed class StreamSession
             outH = capture.Height & ~1;
         }
 
-        string encoder = EncoderAdapterResolver.Select(capture, captureDeviceSelected, _config.Encoder);
+        var sourceAdapter = new EncoderAdapterIdentity(
+            capture.GpuVendorId,
+            capture.AdapterLuid,
+            capture.DriverVersion);
+        RawVideoEncoderSelection rawVideo = EncoderAdapterResolver.Resolve(
+            capture,
+            captureDeviceSelected,
+            _config.Encoder);
+        string encoder = rawVideo.Encoder;
         ActiveEncoder = encoder;
         OutputWidth = outW;
         OutputHeight = outH;
@@ -238,6 +246,25 @@ public sealed class StreamSession
         int bitrateKbps = _config.BitrateKbps > 0 ? _config.BitrateKbps : AutoBitrate(outW, outH, fps);
         if (_config.BitrateKbps <= 0)
             Console.WriteLine($"[encoder] auto bitrate for {outH}p{fps}: {bitrateKbps} kbps");
+
+        IReadOnlyList<EncoderAdapterIdentity> hardwareAdapters =
+            HardwareVideoLanePolicy.NeedsAdapterEnumeration(_config.Encoder, sourceAdapter)
+                ? EncoderAdapterResolver.EnumerateHardwareAdapters()
+                : [rawVideo.Adapter, sourceAdapter];
+        var hardwareParameters = HardwareVideoEncoderParameters.FromSession(
+            outW,
+            outH,
+            fps,
+            bitrateKbps);
+        using var hardwareEncoder = new UnavailableHardwareVideoEncoder();
+        VideoPipelinePlan videoPlan = HardwareVideoLanePolicy.Select(
+            _config.Encoder,
+            rawVideo,
+            sourceAdapter,
+            capture is IGpuTextureCaptureSource,
+            hardwareAdapters,
+            hardwareParameters,
+            hardwareEncoder.Probe);
 
         AudioPipeline? audioPipeline = AudioPipeline.Create(
             _config.AudioPid,
@@ -368,7 +395,20 @@ public sealed class StreamSession
         string exitReason;
         try
         {
-            exitReason = PacingLoop(capture, ffmpeg, writer, broadcaster, splitterTask, serverTask, fps, ct);
+            IVideoPacingLane pacingLane = VideoPacingLaneFactory.Select(
+                videoPlan,
+                new RawVideoPacingLane(
+                    capture,
+                    ffmpeg,
+                    writer,
+                    broadcaster,
+                    splitterTask,
+                    serverTask,
+                    fps,
+                    _videoEpoch,
+                    stage => _pacingStage = stage),
+                hardwareLaneFactory: null);
+            exitReason = pacingLane.Run(ct);
         }
         finally
         {
@@ -503,107 +543,6 @@ public sealed class StreamSession
         CaptureProgressSnapshot? Capture,
         FrameWriterProgress Writer,
         long Fragments);
-
-    private string PacingLoop(ICaptureSource capture, FfmpegEncoder ffmpeg, FrameWriter writer,
-        Broadcaster broadcaster, Task splitterTask, Task serverTask, int fps, CancellationToken ct)
-    {
-        using var timer = new HighResTimer();
-        if (!timer.IsHighResolution)
-            Console.WriteLine("[pacing] WARNING: high-resolution timer unavailable, falling back to Sleep()");
-        long ticksPerFrame = Stopwatch.Frequency / fps;
-        int graceMs = Math.Max(1000 / fps * 2 / 5, 2);
-        long next = Stopwatch.GetTimestamp() + ticksPerFrame;
-        long lastVersion = 0;
-        bool videoEpochProduced = false;
-        long freshCount = 0, dupCount = 0, pacingSlips = 0, lastCompositorFrames = 0;
-        long lastReport = Stopwatch.GetTimestamp();
-        long reportInterval = Stopwatch.Frequency * 2;
-
-        while (!ct.IsCancellationRequested)
-        {
-            broadcaster.WaitingForWindow = capture is WindowReattachCapture
-            {
-                WaitingForWindow: true,
-            };
-            _pacingStage = "waiting-for-sample-time";
-            timer.WaitUntil(next);
-
-            _pacingStage = "supervising-pipeline";
-            if (ffmpeg.HasExited || writer.Failed)
-            {
-                Console.Error.WriteLine($"[encoder] ffmpeg exited unexpectedly (code {ffmpeg.ExitCode}); stopping.");
-                return $"encoder exited unexpectedly (code {ffmpeg.ExitCode})";
-            }
-            if (capture.CaptureError is not null)
-            {
-                return $"capture failed mid-stream: {capture.CaptureError.Message}";
-            }
-            // Supervise the background halves: a dead splitter otherwise shows up
-            // later as a bogus "encoder stall", a dead server as a silent stream.
-            if (splitterTask.IsFaulted)
-            {
-                Console.Error.WriteLine($"[mp4] splitter failed: {splitterTask.Exception?.GetBaseException().Message}");
-                return "mp4 splitter failed; see log";
-            }
-            if (serverTask.IsFaulted)
-            {
-                Console.Error.WriteLine($"[http] server failed: {serverTask.Exception?.GetBaseException().Message}");
-                return "web server failed; see log";
-            }
-
-            _pacingStage = "waiting-for-capture";
-            bool fresh = capture.WaitForFreshFrame(lastVersion, graceMs);
-            lastVersion = capture.FrameVersion;
-
-            byte[] buffer;
-            _pacingStage = "waiting-for-frame-buffer";
-            try { buffer = writer.RentBuffer(ct); }
-            catch (OperationCanceledException) { break; }
-
-            _pacingStage = "gpu-readback";
-            bool frameReady = capture.TryReadFrame(buffer);
-            // A stalled native readback can return after external salvage released
-            // the downstream pipeline. Cancellation fences that late result off.
-            if (ct.IsCancellationRequested) break;
-            if (frameReady)
-            {
-                // Produce the A/V epoch at the first enqueue toward ffmpeg. The
-                // audio continuation cannot construct capture until this succeeds.
-                long enqueueTicks = videoEpochProduced ? 0 : Stopwatch.GetTimestamp();
-                _pacingStage = "frame-enqueue";
-                writer.Enqueue(buffer);
-                if (!videoEpochProduced)
-                {
-                    _videoEpoch.TrySetResult(enqueueTicks);
-                    videoEpochProduced = true;
-                }
-                if (fresh) freshCount++; else dupCount++;
-            }
-            else
-            {
-                writer.ReturnUnused(buffer);
-            }
-            _pacingStage = "sample-complete";
-
-            next += ticksPerFrame;
-            long now = Stopwatch.GetTimestamp();
-            if (now > next + 5 * ticksPerFrame) { next = now + ticksPerFrame; pacingSlips++; }
-
-            if (now - lastReport > reportInterval)
-            {
-                reportInterval = Stopwatch.Frequency * 10;
-                long total = freshCount + dupCount;
-                double dupPct = total > 0 ? dupCount * 100.0 / total : 0;
-                double windowSec = (double)(now - lastReport) / Stopwatch.Frequency;
-                broadcaster.SourceFps = (int)Math.Round((capture.FramesArrived - lastCompositorFrames) / windowSec);
-                broadcaster.DupPercent = (int)Math.Round(dupPct);
-                lastCompositorFrames = capture.FramesArrived;
-                freshCount = dupCount = 0;
-                lastReport = now;
-            }
-        }
-        return "stopped";
-    }
 
     /// <summary>Low/Medium/High bitrate options for an output size. Classified by
     /// pixel AREA, not height - a 1080x1871 portrait window has 1080p-class pixels
