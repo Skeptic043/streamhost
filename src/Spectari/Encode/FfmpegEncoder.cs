@@ -2,8 +2,14 @@ using System.Diagnostics;
 
 namespace Spectari.Encode;
 
+internal enum FfmpegVideoInput
+{
+    RawBgra,
+    H264AnnexB,
+}
+
 /// <summary>
-/// Drives ffmpeg as a child process: raw BGRA frames in on stdin, low-latency
+/// Drives ffmpeg as a child process: video in on stdin, low-latency
 /// fragmented MP4 (H.264) out on stdout. One fragment per frame via -frag_duration.
 /// </summary>
 public sealed class FfmpegEncoder : IDisposable
@@ -16,6 +22,7 @@ public sealed class FfmpegEncoder : IDisposable
 
     public Stream Output => _process.StandardOutput.BaseStream;
     public string EncoderName { get; }
+    internal bool CopiesH264Video { get; }
 
     /// <summary>Bundled ffmpeg.exe next to our exe wins; PATH is the fallback.</summary>
     public static string FfmpegPath { get; } =
@@ -27,9 +34,21 @@ public sealed class FfmpegEncoder : IDisposable
         int inWidth, int inHeight, int fps, int bitrateKbps,
         int outWidth, int outHeight, string encoder, string? audioPipeName = null,
         int fragMs = 0)
+        : this(
+            inWidth, inHeight, fps, bitrateKbps, outWidth, outHeight,
+            encoder, audioPipeName, fragMs, FfmpegVideoInput.RawBgra)
+    {
+    }
+
+    internal FfmpegEncoder(
+        int inWidth, int inHeight, int fps, int bitrateKbps,
+        int outWidth, int outHeight, string encoder, string? audioPipeName,
+        int fragMs,
+        FfmpegVideoInput videoInput)
     {
         LogBuildInfoOnce(); // first stream start records the exact bundled ffmpeg to the log
-        EncoderName = encoder;
+        CopiesH264Video = videoInput == FfmpegVideoInput.H264AnnexB;
+        EncoderName = CopiesH264Video ? "Media Foundation H.264" : encoder;
         int gop = Math.Max(fps / 2, 1);              // keyframe every 0.5 s => fast late-join/resync
         long fragUs = fragMs > 0 ? fragMs * 1000L    // batched fragments (fewer, larger MSE appends)
                                  : 1_000_000L / fps; // default: one fragment per frame
@@ -53,17 +72,24 @@ public sealed class FfmpegEncoder : IDisposable
         // output (indistinguishable from an encoder stall). Half a second keeps
         // interleaving tight in the healthy case and force-flushes video-only
         // fragments when audio starves - a degraded stream instead of no stream.
-        string args =
-            $"-hide_banner -loglevel warning " +
-            $"-thread_queue_size 128 -f rawvideo -pixel_format bgra -video_size {inWidth}x{inHeight} -framerate {fps} -i pipe:0 " +
-            audioIn +
-            scale +
-            $"{audioOut}-c:v {encoder} {encoderOpts} " +
-            $"-b:v {bitrateKbps}k -maxrate {bitrateKbps * 5 / 4}k -bufsize {bitrateKbps / 2}k " +
-            $"-g {gop} -bf 0 -pix_fmt yuv420p " +
-            $"-f mp4 -movflags +empty_moov+default_base_moof -frag_duration {fragUs} " +
-            $"-max_interleave_delta 500000 " +
-            $"-flush_packets 1 pipe:1";
+        string args = videoInput == FfmpegVideoInput.H264AnnexB
+            ? $"-hide_banner -loglevel warning " +
+              $"-thread_queue_size 128 -f h264 -framerate {fps} -i pipe:0 " +
+              audioIn +
+              $"{audioOut}-c:v copy " +
+              $"-f mp4 -movflags +empty_moov+default_base_moof -frag_duration {fragUs} " +
+              $"-max_interleave_delta 500000 " +
+              $"-flush_packets 1 pipe:1"
+            : $"-hide_banner -loglevel warning " +
+              $"-thread_queue_size 128 -f rawvideo -pixel_format bgra -video_size {inWidth}x{inHeight} -framerate {fps} -i pipe:0 " +
+              audioIn +
+              scale +
+              $"{audioOut}-c:v {encoder} {encoderOpts} " +
+              $"-b:v {bitrateKbps}k -maxrate {bitrateKbps * 5 / 4}k -bufsize {bitrateKbps / 2}k " +
+              $"-g {gop} -bf 0 -pix_fmt yuv420p " +
+              $"-f mp4 -movflags +empty_moov+default_base_moof -frag_duration {fragUs} " +
+              $"-max_interleave_delta 500000 " +
+              $"-flush_packets 1 pipe:1";
 
         _process = new Process
         {
@@ -138,6 +164,11 @@ public sealed class FfmpegEncoder : IDisposable
     public void WriteFrame(byte[] frame, int length)
     {
         _stdin.Write(frame, 0, length);
+    }
+
+    public void WritePacket(ReadOnlySpan<byte> packet)
+    {
+        _stdin.Write(packet);
     }
 
     /// <summary>Single source of truth for the positive-probe cache file

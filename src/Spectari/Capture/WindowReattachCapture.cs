@@ -10,7 +10,8 @@ namespace Spectari.Capture;
 /// Keeps one window-share canvas alive while its application is absent, then
 /// replaces the WGC source with a newly appeared window from that application.
 /// </summary>
-internal sealed class WindowReattachCapture : ICaptureSource, ICaptureDiagnostics, IGpuTextureCaptureSource
+internal sealed class WindowReattachCapture : ICaptureSource, ICaptureDiagnostics,
+    IGpuTextureCaptureSource, IGpuWaitingFrameSource
 {
     private const int CandidatePollMs = 500;
     private const int CandidateFirstFrameMs = 5000;
@@ -22,6 +23,7 @@ internal sealed class WindowReattachCapture : ICaptureSource, ICaptureDiagnostic
     private readonly AutoResetEvent _stateChanged = new(false);
     private readonly Thread _worker;
     private readonly byte[] _waitingFrame;
+    private readonly GpuCaptureDevice? _sharedDevice;
     private readonly string _applicationName;
     private readonly uint _gpuVendorId;
     private readonly string _adapterName;
@@ -41,19 +43,22 @@ internal sealed class WindowReattachCapture : ICaptureSource, ICaptureDiagnostic
     private bool _cursorEnabled = true;
     private bool _candidateEnumerationFailureLogged;
     private bool _disposed;
+    private int _workerResourcesDisposed;
 
     private WindowReattachCapture(
         ScreenCapture initialCapture,
         string applicationName,
         WindowIdentity initialIdentity,
         Func<List<WindowDescription>> enumerateWindows,
-        Func<IntPtr, int, int, ScreenCapture> createCapture)
+        Func<IntPtr, int, int, ScreenCapture> createCapture,
+        GpuCaptureDevice? sharedDevice = null)
     {
         _active = initialCapture;
         _applicationName = applicationName;
         _activeIdentity = initialIdentity;
         _enumerateWindows = enumerateWindows;
         _createCapture = createCapture;
+        _sharedDevice = sharedDevice;
         Width = initialCapture.Width;
         Height = initialCapture.Height;
         _gpuVendorId = initialCapture.GpuVendorId;
@@ -77,9 +82,17 @@ internal sealed class WindowReattachCapture : ICaptureSource, ICaptureDiagnostic
     internal static WindowReattachCapture Create(
         IntPtr windowHandle,
         string applicationName,
-        uint processId)
+        uint processId,
+        string? preferredAdapterLuid = null)
     {
-        ScreenCapture initial = ScreenCapture.ForWindow(windowHandle);
+        GpuCaptureDevice sharedDevice = GpuCaptureDevice.Create(preferredAdapterLuid);
+        ScreenCapture initial;
+        try { initial = ScreenCapture.ForWindow(windowHandle, sharedDevice); }
+        catch
+        {
+            sharedDevice.Dispose();
+            throw;
+        }
         try
         {
             return new WindowReattachCapture(
@@ -87,11 +100,14 @@ internal sealed class WindowReattachCapture : ICaptureSource, ICaptureDiagnostic
                 applicationName,
                 new WindowIdentity(windowHandle, processId),
                 WindowEnumerator.GetWindows,
-                ScreenCapture.ForWindow);
+                (handle, width, height) =>
+                    ScreenCapture.ForWindow(handle, width, height, sharedDevice),
+                sharedDevice);
         }
         catch
         {
             initial.Dispose();
+            sharedDevice.Dispose();
             throw;
         }
     }
@@ -209,6 +225,20 @@ internal sealed class WindowReattachCapture : ICaptureSource, ICaptureDiagnostic
         return ((IGpuTextureCaptureSource)active).TryGetGpuTexture(out frame);
     }
 
+    bool IGpuWaitingFrameSource.TryGetWaitingFrame(out ReadOnlyMemory<byte> bgraFrame)
+    {
+        lock (_gate)
+        {
+            if (!_waiting)
+            {
+                bgraFrame = default;
+                return false;
+            }
+            bgraFrame = _waitingFrame;
+            return true;
+        }
+    }
+
     private void OnTargetClosed(ScreenCapture closedCapture)
     {
         WindowLossGate lossGate;
@@ -304,67 +334,76 @@ internal sealed class WindowReattachCapture : ICaptureSource, ICaptureDiagnostic
     private void ReattachLoop()
     {
         CancellationToken ct = _cts.Token;
-        while (!ct.IsCancellationRequested)
+        try
         {
-            ScreenCapture? active;
-            WindowIdentity activeIdentity;
-            WindowLossGate? lossGate;
-            WindowReattachPolicy? policy;
-            lock (_gate)
+            while (!ct.IsCancellationRequested)
             {
-                active = _waiting ? null : _active;
-                activeIdentity = _activeIdentity;
-                lossGate = active is null ? null : _lossGate;
-                policy = _waiting ? _policy : null;
-            }
-
-            if (active is not null && lossGate is not null)
-            {
-                if (!IsWindow(activeIdentity.Handle))
-                    OnTargetLost(active, lossGate, WindowLossReason.InvalidWindowHandle);
-                WaitForWork(CandidatePollMs, ct);
-                continue;
-            }
-
-            if (policy is null)
-            {
-                WaitForWork(Timeout.Infinite, ct);
-                continue;
-            }
-
-            WindowDescription? candidate;
-            try
-            {
-                List<WindowDescription> currentWindows = _enumerateWindows();
+                ScreenCapture? active;
+                WindowIdentity activeIdentity;
+                WindowLossGate? lossGate;
+                WindowReattachPolicy? policy;
                 lock (_gate)
                 {
-                    candidate = policy.SelectCandidate(currentWindows.Where(window =>
-                        !_failedCandidates.Contains(WindowReattachPolicy.IdentityOf(window))));
+                    active = _waiting ? null : _active;
+                    activeIdentity = _activeIdentity;
+                    lossGate = active is null ? null : _lossGate;
+                    policy = _waiting ? _policy : null;
                 }
-            }
-            catch (Exception ex)
-            {
-                bool shouldLog;
-                lock (_gate)
+
+                if (active is not null && lossGate is not null)
                 {
-                    shouldLog = !_candidateEnumerationFailureLogged;
-                    _candidateEnumerationFailureLogged = true;
+                    if (!IsWindow(activeIdentity.Handle))
+                        OnTargetLost(active, lossGate, WindowLossReason.InvalidWindowHandle);
+                    WaitForWork(CandidatePollMs, ct);
+                    continue;
                 }
-                if (shouldLog)
-                    Console.Error.WriteLine(
-                        $"[window-reattach] candidate enumeration failed; still waiting: {SingleLine(ex.Message)}");
-                WaitForWork(CandidatePollMs, ct);
-                continue;
-            }
 
-            if (candidate is null)
-            {
-                WaitForWork(CandidatePollMs, ct);
-                continue;
-            }
+                if (policy is null)
+                {
+                    WaitForWork(Timeout.Infinite, ct);
+                    continue;
+                }
 
-            TryAttachCandidate(policy, candidate, ct);
-            WaitForWork(CandidatePollMs, ct);
+                WindowDescription? candidate;
+                try
+                {
+                    List<WindowDescription> currentWindows = _enumerateWindows();
+                    lock (_gate)
+                    {
+                        candidate = policy.SelectCandidate(currentWindows.Where(window =>
+                            !_failedCandidates.Contains(WindowReattachPolicy.IdentityOf(window))));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    bool shouldLog;
+                    lock (_gate)
+                    {
+                        shouldLog = !_candidateEnumerationFailureLogged;
+                        _candidateEnumerationFailureLogged = true;
+                    }
+                    if (shouldLog)
+                        Console.Error.WriteLine(
+                            $"[window-reattach] candidate enumeration failed; still waiting: {SingleLine(ex.Message)}");
+                    WaitForWork(CandidatePollMs, ct);
+                    continue;
+                }
+
+                if (candidate is null)
+                {
+                    WaitForWork(CandidatePollMs, ct);
+                    continue;
+                }
+
+                TryAttachCandidate(policy, candidate, ct);
+                WaitForWork(CandidatePollMs, ct);
+            }
+        }
+        finally
+        {
+            bool disposed;
+            lock (_gate) disposed = _disposed;
+            if (disposed) DisposeWorkerResources();
         }
     }
 
@@ -610,13 +649,20 @@ internal sealed class WindowReattachCapture : ICaptureSource, ICaptureDiagnostic
 
         if (_worker != Thread.CurrentThread && _worker.Join(2000))
         {
-            _stateChanged.Dispose();
-            _cts.Dispose();
+            DisposeWorkerResources();
         }
         else if (_worker.IsAlive)
         {
             Console.Error.WriteLine(
                 "[window-reattach] background worker did not stop within 2 seconds; cleanup will finish when its current capture call returns.");
         }
+    }
+
+    private void DisposeWorkerResources()
+    {
+        if (Interlocked.Exchange(ref _workerResourcesDisposed, 1) != 0) return;
+        _stateChanged.Dispose();
+        _cts.Dispose();
+        _sharedDevice?.Dispose();
     }
 }

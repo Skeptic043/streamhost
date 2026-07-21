@@ -172,29 +172,47 @@ internal interface IEncodedAccessUnitSink
 /// </summary>
 internal sealed class HardwareVideoPacingLane : IVideoPacingLane
 {
-    private readonly IGpuTextureCaptureSource _capture;
+    private readonly ICaptureSource _capture;
+    private readonly IGpuTextureCaptureSource _gpuCapture;
     private readonly Nv12FrameConverter _converter;
     private readonly IHardwareVideoEncoder _encoder;
     private readonly IEncodedAccessUnitSink _output;
-    private readonly FrameDebtPolicy _debt;
+    private readonly IVideoInputWriter _writer;
+    private readonly FfmpegEncoder _ffmpeg;
+    private readonly Broadcaster _broadcaster;
+    private readonly Task _splitterTask;
+    private readonly Task _serverTask;
+    private readonly HardwareFrameTickPolicy _ticks;
     private readonly int _framesPerSecond;
     private readonly TaskCompletionSource<long> _videoEpoch;
     private readonly Action<string> _setStage;
 
     internal HardwareVideoPacingLane(
-        IGpuTextureCaptureSource capture,
+        ICaptureSource capture,
+        IGpuTextureCaptureSource gpuCapture,
         Nv12FrameConverter converter,
         IHardwareVideoEncoder encoder,
         IEncodedAccessUnitSink output,
+        IVideoInputWriter writer,
+        FfmpegEncoder ffmpeg,
+        Broadcaster broadcaster,
+        Task splitterTask,
+        Task serverTask,
         int framesPerSecond,
         TaskCompletionSource<long> videoEpoch,
         Action<string> setStage)
     {
         _capture = capture;
+        _gpuCapture = gpuCapture;
         _converter = converter;
         _encoder = encoder;
         _output = output;
-        _debt = new FrameDebtPolicy(framesPerSecond);
+        _writer = writer;
+        _ffmpeg = ffmpeg;
+        _broadcaster = broadcaster;
+        _splitterTask = splitterTask;
+        _serverTask = serverTask;
+        _ticks = new HardwareFrameTickPolicy(framesPerSecond);
         _framesPerSecond = framesPerSecond;
         _videoEpoch = videoEpoch;
         _setStage = setStage;
@@ -207,37 +225,65 @@ internal sealed class HardwareVideoPacingLane : IVideoPacingLane
         long frameDuration100ns = Math.Max(1, TimeSpan.TicksPerSecond / _framesPerSecond);
         long next = Stopwatch.GetTimestamp() + pacingTicks;
         long submittedFrames = 0;
-        bool epochProduced = false;
+        long encodedUnits = 0;
+        long freshFrames = 0;
+        long duplicateFrames = 0;
+        long lastVersion = _capture.FrameVersion;
+        long lastCaptureFrames = _capture.FramesArrived;
+        long lastReport = Stopwatch.GetTimestamp();
+        long reportInterval = Stopwatch.Frequency * 2;
+        long lastDebtLog = 0;
 
         while (!cancellationToken.IsCancellationRequested)
         {
+            _broadcaster.WaitingForWindow = _capture is WindowReattachCapture
+            {
+                WaitingForWindow: true,
+            };
             _setStage("waiting-for-sample-time");
             timer.WaitUntil(next);
             next += pacingTicks;
 
+            _setStage("supervising-pipeline");
+            string? failure = SupervisePipeline();
+            if (failure is not null) return RuntimeFailure(failure);
+
+            long currentVersion = _capture.FrameVersion;
+            bool fresh = currentVersion != lastVersion;
+            lastVersion = currentVersion;
+
             _setStage("gpu-scale-convert");
-            if (!_converter.TryConvert(_capture, out VideoFrameLease? current, out _))
+            if (!_converter.TryConvert(_gpuCapture, out VideoFrameLease? current, out Nv12ConvertFailure convertFailure))
             {
-                _debt.RecordDroppedTick();
+                FrameDebtSnapshot debt = _ticks.RecordUnavailableTick();
+                long debtNow = Stopwatch.GetTimestamp();
+                if (debtNow - lastDebtLog >= Stopwatch.Frequency || debt.StallSignal)
+                {
+                    Console.Error.WriteLine(
+                        $"[gpu-encode] frame debt: {debt.DebtFrames} frames, sync error {debt.SyncError.TotalMilliseconds:F1} ms ({convertFailure}).");
+                    lastDebtLog = debtNow;
+                }
+                if (debt.StallSignal)
+                    return RuntimeFailure(
+                        $"sustained frame debt reached {debt.DebtFrames} frames after {convertFailure}",
+                        HardwareFallbackKind.SustainedFrameDebt);
                 continue;
             }
 
             VideoFrameLease? duplicate = null;
-            bool repay = _debt.Current.DebtFrames > 0 &&
+            bool repay = _ticks.CurrentDebt.DebtFrames > 0 &&
                 _converter.TryDuplicate(current!, out duplicate);
-            FrameSubmissionPlan plan = _debt.PlanAvailableTick(repay);
-            VideoFrameLease[] submissions = plan.SubmissionCount == 2
+            HardwareFrameTickPlan plan = _ticks.PlanAvailableTick(repay);
+            VideoFrameLease[] submissions = plan.DuplicateSubmissions == 1
                 ? [current!, duplicate!]
                 : [current!];
+            if (fresh) freshFrames++;
+            else duplicateFrames++;
+            duplicateFrames += plan.DuplicateSubmissions;
 
-            foreach (VideoFrameLease frame in submissions)
+            for (int submissionIndex = 0; submissionIndex < submissions.Length; submissionIndex++)
             {
-                if (!epochProduced)
-                {
-                    _videoEpoch.TrySetResult(Stopwatch.GetTimestamp());
-                    epochProduced = true;
-                }
-
+                VideoFrameLease frame = submissions[submissionIndex];
                 try
                 {
                     _setStage("hardware-encode");
@@ -245,7 +291,10 @@ internal sealed class HardwareVideoPacingLane : IVideoPacingLane
                         frame,
                         submittedFrames * frameDuration100ns,
                         frameDuration100ns);
+                    if (_ticks.ConfirmEncoderSubmission(_encoder.SubmittedFrameCount > 0))
+                        _videoEpoch.TrySetResult(Stopwatch.GetTimestamp());
                     submittedFrames++;
+                    encodedUnits += output.Count;
                     if (output.Count > 0)
                     {
                         _setStage("access-unit-output");
@@ -254,7 +303,12 @@ internal sealed class HardwareVideoPacingLane : IVideoPacingLane
                 }
                 catch
                 {
-                    frame.Return(FrameLeaseReturnReason.Failure);
+                    for (int pendingIndex = submissionIndex + 1;
+                        pendingIndex < submissions.Length;
+                        pendingIndex++)
+                    {
+                        submissions[pendingIndex].Return(FrameLeaseReturnReason.Failure);
+                    }
                     throw;
                 }
             }
@@ -263,6 +317,25 @@ internal sealed class HardwareVideoPacingLane : IVideoPacingLane
             long now = Stopwatch.GetTimestamp();
             if (now > next + 5 * pacingTicks)
                 next = now + pacingTicks;
+
+            if (now - lastReport > reportInterval)
+            {
+                double seconds = (now - lastReport) / (double)Stopwatch.Frequency;
+                double encodeFps = (freshFrames + duplicateFrames) / seconds;
+                long totalFrames = freshFrames + duplicateFrames;
+                double duplicatePercent = totalFrames == 0
+                    ? 0
+                    : duplicateFrames * 100.0 / totalFrames;
+                _broadcaster.SourceFps = (int)Math.Round(
+                    (_capture.FramesArrived - lastCaptureFrames) / seconds);
+                _broadcaster.DupPercent = (int)Math.Round(duplicatePercent);
+                Console.WriteLine(
+                    $"[gpu-encode] encode delivery: {encodeFps:F1} fps, {encodedUnits} access units, debt {plan.Debt.DebtFrames} frames.");
+                lastCaptureFrames = _capture.FramesArrived;
+                freshFrames = duplicateFrames = encodedUnits = 0;
+                lastReport = now;
+                reportInterval = Stopwatch.Frequency * 10;
+            }
         }
 
         _setStage("hardware-drain");
@@ -270,5 +343,27 @@ internal sealed class HardwareVideoPacingLane : IVideoPacingLane
         if (drained.Count > 0)
             _output.Write(drained);
         return "stopped";
+    }
+
+    private string? SupervisePipeline()
+    {
+        if (_ffmpeg.HasExited || _writer.Failed)
+            return $"ffmpeg exited unexpectedly (code {_ffmpeg.ExitCode})";
+        if (_capture.CaptureError is not null)
+            return $"capture failed mid-stream: {_capture.CaptureError.Message}";
+        if (_splitterTask.IsFaulted)
+            return $"mp4 splitter failed: {_splitterTask.Exception?.GetBaseException().Message}";
+        if (_serverTask.IsFaulted)
+            return $"web server failed: {_serverTask.Exception?.GetBaseException().Message}";
+        return null;
+    }
+
+    private static string RuntimeFailure(
+        string reason,
+        HardwareFallbackKind kind = HardwareFallbackKind.RuntimeFailure)
+    {
+        HardwareFallbackDecision decision = HardwareFallbackClassifier.Runtime(kind, reason);
+        Console.Error.WriteLine($"[gpu-encode] {decision.Reason}");
+        return decision.Reason;
     }
 }

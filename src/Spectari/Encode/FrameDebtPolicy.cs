@@ -9,6 +9,43 @@ internal readonly record struct FrameSubmissionPlan(
     int SubmissionCount,
     FrameDebtSnapshot Debt);
 
+internal readonly record struct HardwareFrameTickPlan(
+    int CurrentFrameSubmissions,
+    int DuplicateSubmissions,
+    FrameDebtSnapshot Debt);
+
+/// <summary>Pure timing contract for fixed-rate hardware submissions.</summary>
+internal sealed class HardwareFrameTickPolicy
+{
+    private readonly FrameDebtPolicy _debt;
+    private bool _epochAttached;
+
+    internal HardwareFrameTickPolicy(int framesPerSecond, int? stallThresholdFrames = null)
+    {
+        _debt = new FrameDebtPolicy(framesPerSecond, stallThresholdFrames);
+    }
+
+    internal FrameDebtSnapshot CurrentDebt => _debt.Current;
+
+    internal FrameDebtSnapshot RecordUnavailableTick() => _debt.RecordDroppedTick();
+
+    internal HardwareFrameTickPlan PlanAvailableTick(bool duplicateAvailable)
+    {
+        FrameSubmissionPlan submission = _debt.PlanAvailableTick(duplicateAvailable);
+        return new HardwareFrameTickPlan(
+            CurrentFrameSubmissions: 1,
+            DuplicateSubmissions: submission.SubmissionCount - 1,
+            submission.Debt);
+    }
+
+    internal bool ConfirmEncoderSubmission(bool encoderSubmitted)
+    {
+        if (!encoderSubmitted || _epochAttached) return false;
+        _epochAttached = true;
+        return true;
+    }
+}
+
 /// <summary>
 /// Keeps a fixed-rate video timeline aligned with wall-clock audio after dropped ticks.
 /// A later successful tick submits the current frame and at most one duplicate.

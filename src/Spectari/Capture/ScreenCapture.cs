@@ -141,12 +141,27 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics, IGpuTex
     public static ScreenCapture ForWindow(IntPtr hWnd) =>
         CreateForTarget("window", () => D3DInterop.CreateItemForWindow(hWnd));
 
+    internal static ScreenCapture ForWindow(IntPtr hWnd, GpuCaptureDevice device) =>
+        CreateForTarget("window", () => D3DInterop.CreateItemForWindow(hWnd), sharedDevice: device);
+
     internal static ScreenCapture ForWindow(IntPtr hWnd, int outputWidth, int outputHeight) =>
         CreateForTarget(
             "window",
             () => D3DInterop.CreateItemForWindow(hWnd),
             outputWidth: outputWidth,
             outputHeight: outputHeight);
+
+    internal static ScreenCapture ForWindow(
+        IntPtr hWnd,
+        int outputWidth,
+        int outputHeight,
+        GpuCaptureDevice device) =>
+        CreateForTarget(
+            "window",
+            () => D3DInterop.CreateItemForWindow(hWnd),
+            outputWidth: outputWidth,
+            outputHeight: outputHeight,
+            sharedDevice: device);
 
     internal static ScreenCapture ForPreviewMonitor(IntPtr hMonitor, CaptureCreationTrace trace) =>
         CreateForTarget("monitor", () => D3DInterop.CreateItemForMonitor(hMonitor), writeDiagnostics: false, trace);
@@ -160,7 +175,8 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics, IGpuTex
         bool writeDiagnostics = true,
         CaptureCreationTrace? trace = null,
         int? outputWidth = null,
-        int? outputHeight = null)
+        int? outputHeight = null,
+        GpuCaptureDevice? sharedDevice = null)
     {
         string itemStep = targetKind == "window"
             ? "GraphicsCaptureItem.CreateForWindow"
@@ -191,7 +207,8 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics, IGpuTex
             height,
             writeDiagnostics,
             targetKind == "window",
-            trace);
+            trace,
+            sharedDevice);
         trace?.MarkChainProven();
         return capture;
     }
@@ -203,7 +220,8 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics, IGpuTex
         int height,
         bool writeDiagnostics,
         bool isWindowCapture,
-        CaptureCreationTrace? trace)
+        CaptureCreationTrace? trace,
+        GpuCaptureDevice? sharedDevice)
     {
         _writeDiagnostics = writeDiagnostics;
         if (writeDiagnostics && isWindowCapture)
@@ -213,12 +231,19 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics, IGpuTex
                 TimeSpan.FromSeconds(10));
         }
         trace?.Begin("D3D11CreateDevice");
-        D3D11.D3D11CreateDevice(
-            null, DriverType.Hardware, DeviceCreationFlags.BgraSupport,
-            null!, out ID3D11Device? device, out _, out ID3D11DeviceContext? context).CheckError();
+        if (sharedDevice is null)
+        {
+            D3D11.D3D11CreateDevice(
+                null, DriverType.Hardware, DeviceCreationFlags.BgraSupport,
+                null!, out ID3D11Device? device, out _, out ID3D11DeviceContext? context).CheckError();
+            _device = device!;
+            _context = context!;
+        }
+        else
+        {
+            (_device, _context) = sharedDevice.Acquire();
+        }
         trace?.Complete("D3D11CreateDevice");
-        _device = device!;
-        _context = context!;
 
         // The free-threaded WGC frame pool uses this device from its own threads;
         // multithread protection makes the runtime serialize every context call

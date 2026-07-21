@@ -44,7 +44,7 @@ public sealed class HardwareVideoLanePolicyTests
 
         Assert.Equal(target, plan.HardwareAdapter);
         Assert.Equal(VideoInputLane.RawVideo, plan.Lane);
-        Assert.Equal(requested, plan.RawVideoEncoder);
+        Assert.Equal("libx264", plan.RawVideoEncoder);
     }
 
     [Fact]
@@ -95,7 +95,28 @@ public sealed class HardwareVideoLanePolicyTests
     }
 
     [Fact]
-    public void PhaseOneUnavailableProbePreservesCurrentRawvideoFallback()
+    public void CrossAdapterTargetFallsBackBeforeProbe()
+    {
+        EncoderAdapterIdentity source = Adapter(0x8086, "intel-luid", "intel-driver");
+        EncoderAdapterIdentity target = Adapter(0x10DE, "nvidia-luid", "nvidia-driver");
+
+        VideoPipelinePlan plan = HardwareVideoLanePolicy.Select(
+            "h264_nvenc",
+            new RawVideoEncoderSelection("h264_nvenc", target),
+            source,
+            textureCaptureAvailable: true,
+            [target],
+            Parameters(),
+            (_, _) => throw new InvalidOperationException("Mismatch must not probe."));
+
+        Assert.Equal(VideoInputLane.RawVideo, plan.Lane);
+        Assert.Equal("libx264", plan.RawVideoEncoder);
+        Assert.True(plan.RequiresSessionCpuRecovery);
+        Assert.Contains("cross-adapter", plan.Reason);
+    }
+
+    [Fact]
+    public void UnavailableProbeFallsBackToCpuRawvideo()
     {
         EncoderAdapterIdentity amd = Adapter(0x1002, "amd-luid", "amd-driver");
         using var encoder = new UnavailableHardwareVideoEncoder();
@@ -110,8 +131,9 @@ public sealed class HardwareVideoLanePolicyTests
             encoder.Probe);
 
         Assert.Equal(VideoInputLane.RawVideo, plan.Lane);
-        Assert.Equal("h264_amf", plan.RawVideoEncoder);
-        Assert.Equal(UnavailableHardwareVideoEncoder.UnavailableReason, plan.Reason);
+        Assert.Equal("libx264", plan.RawVideoEncoder);
+        Assert.True(plan.RequiresSessionCpuRecovery);
+        Assert.Contains(UnavailableHardwareVideoEncoder.UnavailableReason, plan.Reason);
     }
 
     [Fact]
@@ -163,6 +185,7 @@ public sealed class HardwareVideoLanePolicyTests
         Assert.Equal(12_000, parameters.BitrateKbps);
         Assert.Equal(15_000, parameters.MaximumBitrateKbps);
         Assert.Equal(6_000, parameters.BufferSizeKbps);
+        Assert.Equal(750_000u, parameters.H264BufferSizeBytes);
         Assert.Equal(30, parameters.GopFrames);
         Assert.Equal(VideoProfile.High, parameters.Profile);
         Assert.Equal(VideoRateControlMode.ConstantBitrate, parameters.RateControlMode);

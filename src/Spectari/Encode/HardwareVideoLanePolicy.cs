@@ -15,7 +15,8 @@ internal readonly record struct VideoPipelinePlan(
     EncoderAdapterIdentity? HardwareAdapter,
     string? HardwareProbeCacheToken,
     HardwareVideoEncoderParameters Parameters,
-    string Reason);
+    string Reason,
+    bool RequiresSessionCpuRecovery = false);
 
 internal static class HardwareEncoderProbeToken
 {
@@ -63,21 +64,61 @@ internal static class HardwareVideoLanePolicy
             sourceAdapter,
             adapters);
         if (target is null)
-            return Raw(rawVideo, parameters, null, null, "no matching hardware adapter was resolved");
+        {
+            HardwareFallbackDecision fallback = HardwareFallbackClassifier.Startup(
+                HardwareFallbackKind.AdapterMismatch,
+                "no matching hardware adapter was resolved");
+            return Raw(
+                rawVideo,
+                parameters,
+                null,
+                null,
+                fallback.Reason,
+                "libx264",
+                requiresSessionCpuRecovery: true);
+        }
+
+        if (!target.Value.Luid.Equals(sourceAdapter.Luid, StringComparison.OrdinalIgnoreCase))
+        {
+            HardwareFallbackDecision fallback = HardwareFallbackClassifier.Startup(
+                HardwareFallbackKind.AdapterMismatch,
+                "capture and encoder adapters differ; cross-adapter zero-copy is unavailable");
+            return Raw(
+                rawVideo,
+                parameters,
+                target,
+                null,
+                fallback.Reason,
+                "libx264",
+                requiresSessionCpuRecovery: true);
+        }
 
         string? token = HardwareEncoderProbeToken.Create(target.Value);
         HardwareEncoderProbeResult result = probe(
             new HardwareEncoderProbeContext(target.Value, token),
             parameters);
-        return result.Available
-            ? new VideoPipelinePlan(
+        if (result.Available)
+        {
+            return new VideoPipelinePlan(
                 VideoInputLane.GpuTexture,
                 rawVideo.Encoder,
                 target,
                 token,
                 parameters,
-                "hardware texture encoder is available")
-            : Raw(rawVideo, parameters, target, token, result.Reason);
+                "hardware texture encoder is available");
+        }
+
+        HardwareFallbackDecision probeFallback = HardwareFallbackClassifier.Startup(
+            HardwareFallbackKind.Probe,
+            result.Reason);
+        return Raw(
+            rawVideo,
+            parameters,
+            target,
+            token,
+            probeFallback.Reason,
+            "libx264",
+            requiresSessionCpuRecovery: true);
     }
 
     internal static EncoderAdapterIdentity? ResolveTargetAdapter(
@@ -123,13 +164,16 @@ internal static class HardwareVideoLanePolicy
         HardwareVideoEncoderParameters parameters,
         EncoderAdapterIdentity? target,
         string? token,
-        string reason) => new(
+        string reason,
+        string? rawVideoEncoder = null,
+        bool requiresSessionCpuRecovery = false) => new(
             VideoInputLane.RawVideo,
-            rawVideo.Encoder,
+            rawVideoEncoder ?? rawVideo.Encoder,
             target,
             token,
             parameters,
-            reason);
+            reason,
+            requiresSessionCpuRecovery);
 
     private static bool IdentityKnown(string? value) =>
         !string.IsNullOrWhiteSpace(value) && value != "?" &&

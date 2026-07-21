@@ -167,6 +167,7 @@ internal sealed class StallTeardownCoordinator
     private readonly SalvageableCleanup _serverLifetime;
     private readonly SalvageableCleanup _audioLifetime;
     private readonly SalvageableCleanup _writerLifetime;
+    private readonly SalvageableCleanup _hardwareVideoLifetime;
     private readonly SalvageableCleanup _captureLifetime;
     private int _armed;
 
@@ -174,7 +175,9 @@ internal sealed class StallTeardownCoordinator
         int teardownTimeoutMs, int port, FfmpegEncoder ffmpeg,
         SalvageableCleanup ffmpegLifetime, string serverPrefix,
         SalvageableCleanup serverLifetime, SalvageableCleanup audioLifetime,
-        SalvageableCleanup writerLifetime, SalvageableCleanup captureLifetime)
+        SalvageableCleanup writerLifetime,
+        SalvageableCleanup hardwareVideoLifetime,
+        SalvageableCleanup captureLifetime)
     {
         _termination = termination;
         _teardownTimeoutMs = teardownTimeoutMs;
@@ -185,6 +188,7 @@ internal sealed class StallTeardownCoordinator
         _serverLifetime = serverLifetime;
         _audioLifetime = audioLifetime;
         _writerLifetime = writerLifetime;
+        _hardwareVideoLifetime = hardwareVideoLifetime;
         _captureLifetime = captureLifetime;
     }
 
@@ -227,7 +231,7 @@ internal sealed class StallTeardownCoordinator
         }
 
         Console.Error.WriteLine(
-            $"[shutdown] salvaged stalled session: ffmpeg child stopped, web server stopped and port {_port} released, audio stopped, frame writer stopped; abandoned capture object and parked session thread; active stages at deadline: {stages}.");
+            $"[shutdown] salvaged stalled session: ffmpeg child stopped, web server stopped and port {_port} released, audio stopped, video input and hardware encoder resources stopped; abandoned capture object and parked session thread; active stages at deadline: {stages}.");
         _termination.CompleteFromSalvage(stopReason);
     }
 
@@ -251,6 +255,8 @@ internal sealed class StallTeardownCoordinator
             return SalvageResult.Failed("audio cleanup did not finish");
         if (!_writerLifetime.TryDisposeForSalvage(SalvageStepTimeoutMs))
             return SalvageResult.Failed("ffmpeg frame-writer cleanup did not finish");
+        if (!_hardwareVideoLifetime.TryDisposeForSalvage(SalvageStepTimeoutMs))
+            return SalvageResult.Failed("hardware video cleanup did not finish");
 
         _captureLifetime.Abandon();
         return SalvageResult.Success;

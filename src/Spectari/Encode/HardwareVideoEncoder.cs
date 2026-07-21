@@ -33,6 +33,9 @@ internal sealed record HardwareVideoEncoderParameters(
     VideoRateControlMode RateControlMode,
     VideoLatencyMode LatencyMode)
 {
+    internal uint H264BufferSizeBytes =>
+        checked((uint)(BufferSizeKbps * 1000L / 8L));
+
     internal static HardwareVideoEncoderParameters FromSession(
         int width,
         int height,
@@ -81,6 +84,8 @@ internal readonly record struct EncodedAccessUnit(ReadOnlyMemory<byte> Data, boo
 /// </summary>
 internal interface IHardwareVideoEncoder : IDisposable
 {
+    long SubmittedFrameCount { get; }
+
     HardwareEncoderProbeResult Probe(
         HardwareEncoderProbeContext context,
         HardwareVideoEncoderParameters parameters);
@@ -102,6 +107,7 @@ internal interface IHardwareVideoEncoder : IDisposable
 internal sealed class UnavailableHardwareVideoEncoder : IHardwareVideoEncoder
 {
     internal const string UnavailableReason = "no hardware encoder implementation is installed";
+    public long SubmittedFrameCount => 0;
 
     public HardwareEncoderProbeResult Probe(
         HardwareEncoderProbeContext context,

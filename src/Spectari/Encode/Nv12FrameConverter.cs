@@ -1,4 +1,5 @@
 using Spectari.Capture;
+using System.Runtime.InteropServices;
 using Vortice;
 using Vortice.Direct3D;
 using Vortice.Direct3D11;
@@ -18,8 +19,8 @@ internal enum Nv12ConvertFailure
 }
 
 /// <summary>
-/// Creates the lane device at the selected adapter. Same-adapter capture borrows
-/// the capture device; a distinct adapter gets its own explicitly targeted device.
+/// Creates the lane device at the selected adapter. Same-adapter capture retains
+/// its device so a retired window-capture wrapper cannot invalidate the lane.
 /// </summary>
 internal sealed class GpuLaneDevice : IDisposable
 {
@@ -56,11 +57,20 @@ internal static class GpuLaneDeviceFactory
         EncoderAdapterIdentity targetAdapter)
     {
         if (SameLuid(capture.AdapterLuid, targetAdapter.Luid))
+        {
+            Marshal.AddRef(capture.Device.NativePointer);
+            try { Marshal.AddRef(capture.Context.NativePointer); }
+            catch
+            {
+                Marshal.Release(capture.Device.NativePointer);
+                throw;
+            }
             return new GpuLaneDevice(
-                capture.Device,
-                capture.Context,
+                new ID3D11Device(capture.Device.NativePointer),
+                new ID3D11DeviceContext(capture.Context.NativePointer),
                 targetAdapter.Luid,
-                ownsDevice: false);
+                ownsDevice: true);
+        }
 
         using var factory = DXGI.CreateDXGIFactory1<IDXGIFactory1>();
         for (uint index = 0;
@@ -110,9 +120,12 @@ internal sealed class Nv12FrameConverter : IDisposable
     private readonly ID3D11VideoProcessor _processor;
     private readonly ID3D11Texture2D _bgraInput;
     private readonly ID3D11VideoProcessorInputView _inputView;
+    private readonly ID3D11Texture2D _waitingNv12;
+    private readonly ID3D11VideoProcessorOutputView _waitingOutputView;
     private readonly Nv12TexturePool _pool;
     private readonly bool _sameAdapterDevice;
     private int _failureLogged;
+    private bool _waitingFrameUploaded;
     private bool _disposed;
 
     internal Nv12FrameConverter(
@@ -176,6 +189,27 @@ internal sealed class Nv12FrameConverter : IDisposable
                 outputHeight,
                 targetAdapter.Luid,
                 poolCapacity);
+            _waitingNv12 = _laneDevice.Device.CreateTexture2D(new Texture2DDescription
+            {
+                Width = (uint)outputWidth,
+                Height = (uint)outputHeight,
+                MipLevels = 1,
+                ArraySize = 1,
+                Format = Format.NV12,
+                SampleDescription = new SampleDescription(1, 0),
+                Usage = ResourceUsage.Default,
+                BindFlags = BindFlags.RenderTarget,
+                CPUAccessFlags = CpuAccessFlags.None,
+                MiscFlags = ResourceOptionFlags.None,
+            });
+            _videoDevice.CreateVideoProcessorOutputView(
+                _waitingNv12,
+                _enumerator,
+                new VideoProcessorOutputViewDescription
+                {
+                    ViewDimension = VideoProcessorOutputViewDimension.Texture2D,
+                },
+                out _waitingOutputView).CheckError();
 
             _videoContext.VideoProcessorSetStreamSourceRect(
                 _processor,
@@ -196,6 +230,7 @@ internal sealed class Nv12FrameConverter : IDisposable
     }
 
     internal FrameLeaseAccounting PoolAccounting => _pool.GetAccounting();
+    internal nint DevicePointer => _laneDevice.Device.NativePointer;
 
     internal bool TryConvert(
         IGpuTextureCaptureSource captureSource,
@@ -204,6 +239,11 @@ internal sealed class Nv12FrameConverter : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         GpuTextureCaptureStatus status = captureSource.TryGetGpuTexture(out GpuTextureCaptureFrame? frame);
+        if (status == GpuTextureCaptureStatus.CpuFrameOnly &&
+            captureSource is IGpuWaitingFrameSource waitingSource)
+        {
+            return TryCopyWaitingFrame(waitingSource, out lease, out failure);
+        }
         if (status != GpuTextureCaptureStatus.Available || frame is null)
         {
             lease = null;
@@ -274,6 +314,64 @@ internal sealed class Nv12FrameConverter : IDisposable
         }
     }
 
+    private bool TryCopyWaitingFrame(
+        IGpuWaitingFrameSource waitingSource,
+        out VideoFrameLease? lease,
+        out Nv12ConvertFailure failure)
+    {
+        lease = null;
+        try
+        {
+            if (!_waitingFrameUploaded)
+            {
+                if (!waitingSource.TryGetWaitingFrame(out ReadOnlyMemory<byte> bgra))
+                {
+                    lease = null;
+                    failure = Nv12ConvertFailure.CpuFrameOnly;
+                    return false;
+                }
+                _laneDevice.Context.UpdateSubresource(
+                    bgra.Span,
+                    _bgraInput,
+                    0,
+                    checked((uint)_capture.Width * 4),
+                    0);
+                var stream = new VideoProcessorStream
+                {
+                    Enable = true,
+                    InputSurface = _inputView,
+                };
+                _videoContext.VideoProcessorBlt(
+                    _processor,
+                    _waitingOutputView,
+                    0,
+                    1,
+                    [stream]).CheckError();
+                _waitingFrameUploaded = true;
+                Console.WriteLine("[gpu-convert] waiting screen uploaded once to the GPU NV12 lane.");
+            }
+
+            if (!_pool.TryRent(out lease))
+            {
+                failure = Nv12ConvertFailure.PoolExhausted;
+                return false;
+            }
+            ID3D11Texture2D outputTexture = lease!.NativeTexture
+                ?? throw new InvalidOperationException("NV12 pool lease lost its texture.");
+            _laneDevice.Context.CopyResource(outputTexture, _waitingNv12);
+            failure = Nv12ConvertFailure.None;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            lease?.Return(FrameLeaseReturnReason.Failure);
+            lease = null;
+            failure = Nv12ConvertFailure.ConversionFailed;
+            ReportFailureOnce("waiting-frame upload", ex);
+            return false;
+        }
+    }
+
     internal bool TryDuplicate(
         VideoFrameLease source,
         out VideoFrameLease? duplicate)
@@ -313,6 +411,8 @@ internal sealed class Nv12FrameConverter : IDisposable
         if (_disposed) return;
         _disposed = true;
         _pool?.Dispose();
+        _waitingOutputView?.Dispose();
+        _waitingNv12?.Dispose();
         _inputView?.Dispose();
         _bgraInput?.Dispose();
         _processor?.Dispose();

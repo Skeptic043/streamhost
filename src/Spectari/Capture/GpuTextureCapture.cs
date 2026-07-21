@@ -14,6 +14,11 @@ internal interface IGpuTextureCaptureSource
     GpuTextureCaptureStatus TryGetGpuTexture(out GpuTextureCaptureFrame? frame);
 }
 
+internal interface IGpuWaitingFrameSource
+{
+    bool TryGetWaitingFrame(out ReadOnlyMemory<byte> bgraFrame);
+}
+
 /// <summary>
 /// A current BGRA texture source. CopyLatest only queues a GPU copy into a texture
 /// on this device, so the pacing thread never maps capture memory to the CPU.
