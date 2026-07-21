@@ -112,6 +112,7 @@ internal static class AudioInputDeviceEnumerator
                         device,
                         CoreAudioInterop.DeviceFriendlyName);
                     AudioEndpointFormFactor formFactor = ReadFormFactor(device);
+                    Console.WriteLine($"[audio-input] enumerated capture endpoint '{friendlyName}' formFactor={formFactor}");
                     devices.Add(new AudioInputDeviceDescription(id, friendlyName, formFactor));
                 }
                 finally
