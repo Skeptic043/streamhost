@@ -29,4 +29,54 @@ public sealed class DiagnosticLogEventTextTests
             $"[capture-device] native mode: 1920x1080, {expectedPixelFormat}, 59.94 fps (60000/1001)",
             DiagnosticLogEventText.CaptureDeviceNativeMode(format));
     }
+
+    [Fact]
+    public void WindowCaptureMinUpdateIntervalIncludesAppliedTarget()
+    {
+        var result = new WindowCaptureMinUpdateIntervalResult(
+            WindowCaptureMinUpdateIntervalStatus.Applied,
+            WindowCaptureMinUpdateInterval.TargetInterval,
+            60);
+
+        Assert.Equal(
+            "[window-capture] MinUpdateInterval applied: 16.667 ms (60 fps target)",
+            DiagnosticLogEventText.WindowCaptureMinUpdateInterval(result));
+    }
+
+    [Theory]
+    [InlineData(
+        (int)WindowCaptureMinUpdateIntervalStatus.Unavailable,
+        0,
+        "[window-capture] MinUpdateInterval unavailable; system default remains active")]
+    [InlineData(
+        (int)WindowCaptureMinUpdateIntervalStatus.InterfaceQueryFailed,
+        unchecked((int)0x80004005),
+        "[window-capture] MinUpdateInterval interface query failed (HRESULT 0x80004005); system default remains active")]
+    [InlineData(
+        (int)WindowCaptureMinUpdateIntervalStatus.ApplyFailed,
+        unchecked((int)0x80070057),
+        "[window-capture] MinUpdateInterval apply failed (HRESULT 0x80070057); system default remains active")]
+    public void WindowCaptureMinUpdateIntervalDescribesFallback(
+        int statusValue,
+        int hResult,
+        string expected)
+    {
+        var result = new WindowCaptureMinUpdateIntervalResult(
+            (WindowCaptureMinUpdateIntervalStatus)statusValue,
+            TimeSpan.FromTicks(166667),
+            60,
+            hResult);
+
+        Assert.Equal(expected, DiagnosticLogEventText.WindowCaptureMinUpdateInterval(result));
+    }
+
+    [Fact]
+    public void WindowFrameDeliveryRateIncludesMeasuredWindow()
+    {
+        var sample = new WindowFrameDeliveryRateSample(599, 10.01);
+
+        Assert.Equal(
+            "[window-capture] frame delivery: 59.8 fps (599 frames in 10.0s)",
+            DiagnosticLogEventText.WindowFrameDeliveryRate(sample));
+    }
 }

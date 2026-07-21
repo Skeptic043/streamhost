@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using Spectari.Util;
 using Vortice.Direct3D;
 using Vortice.Direct3D11;
 using Vortice.DXGI;
@@ -51,6 +52,7 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics
     private readonly ID3D11DeviceContext _context;
     private readonly IDirect3DDevice _winrtDevice;
     private readonly bool _writeDiagnostics;
+    private readonly WindowFrameDeliveryRateTracker? _windowDeliveryRate;
     private readonly GraphicsCaptureItem _item;
     private readonly Direct3D11CaptureFramePool _framePool;
     private readonly GraphicsCaptureSession _session;
@@ -181,7 +183,14 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics
                 $"{targetKind} has no capturable surface ({itemSize.Width}x{itemSize.Height}); pick another source.");
         }
 
-        var capture = new ScreenCapture(item, itemSize, width, height, writeDiagnostics, trace);
+        var capture = new ScreenCapture(
+            item,
+            itemSize,
+            width,
+            height,
+            writeDiagnostics,
+            targetKind == "window",
+            trace);
         trace?.MarkChainProven();
         return capture;
     }
@@ -192,9 +201,16 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics
         int width,
         int height,
         bool writeDiagnostics,
+        bool isWindowCapture,
         CaptureCreationTrace? trace)
     {
         _writeDiagnostics = writeDiagnostics;
+        if (writeDiagnostics && isWindowCapture)
+        {
+            _windowDeliveryRate = new WindowFrameDeliveryRateTracker(
+                Stopwatch.Frequency,
+                TimeSpan.FromSeconds(10));
+        }
         trace?.Begin("D3D11CreateDevice");
         D3D11.D3D11CreateDevice(
             null, DriverType.Hardware, DeviceCreationFlags.BgraSupport,
@@ -294,6 +310,11 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics
         trace?.Begin("Direct3D11CaptureFramePool.CreateCaptureSession");
         _session = _framePool.CreateCaptureSession(_item);
         trace?.Complete("Direct3D11CaptureFramePool.CreateCaptureSession");
+        if (_windowDeliveryRate is not null)
+        {
+            TryWriteWindowDiagnostic(DiagnosticLogEventText.WindowCaptureMinUpdateInterval(
+                WindowCaptureMinUpdateInterval.Apply(_session)));
+        }
         _session.IsCursorCaptureEnabled = true;
         trace?.Begin("GraphicsCaptureAccess.RequestAccessAsync");
         CaptureBorderSuppression.TryDisable(_session);
@@ -398,7 +419,13 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics
             }
             _hasFrame = true;
             Interlocked.Increment(ref _framesArrived);
-            Interlocked.Exchange(ref _lastFrameReadyTicks, Stopwatch.GetTimestamp());
+            long frameReadyTicks = Stopwatch.GetTimestamp();
+            Interlocked.Exchange(ref _lastFrameReadyTicks, frameReadyTicks);
+            if (_windowDeliveryRate?.RecordFrame(frameReadyTicks) is { } deliveryRate)
+            {
+                TryWriteWindowDiagnostic(
+                    DiagnosticLogEventText.WindowFrameDeliveryRate(deliveryRate));
+            }
             try { _frameSignal.Set(); } catch (ObjectDisposedException) { }
         }
         catch (Exception ex)
@@ -712,6 +739,12 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics
         ReadbackStage.UnmappingGpuReadback => "unmapping-gpu-readback",
         _ => "idle",
     };
+
+    private static void TryWriteWindowDiagnostic(string line)
+    {
+        try { ConsoleMirror.WriteDiagnosticLine(line); }
+        catch { }
+    }
 
     public void Dispose()
     {

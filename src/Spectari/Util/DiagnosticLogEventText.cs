@@ -21,4 +21,32 @@ internal static class DiagnosticLogEventText
         return $"[capture-device] native mode: {format.Width}x{format.Height}, {pixelFormat}, " +
                $"{framesPerSecond} fps ({format.FrameRateNumerator}/{format.FrameRateDenominator})";
     }
+
+    internal static string WindowCaptureMinUpdateInterval(
+        WindowCaptureMinUpdateIntervalResult result)
+    {
+        string milliseconds = result.Interval.TotalMilliseconds.ToString("0.###", CultureInfo.InvariantCulture);
+        return result.Status switch
+        {
+            WindowCaptureMinUpdateIntervalStatus.Applied =>
+                $"[window-capture] MinUpdateInterval applied: {milliseconds} ms " +
+                $"({result.TargetFramesPerSecond} fps target)",
+            WindowCaptureMinUpdateIntervalStatus.Unavailable =>
+                "[window-capture] MinUpdateInterval unavailable; system default remains active",
+            WindowCaptureMinUpdateIntervalStatus.InterfaceQueryFailed =>
+                $"[window-capture] MinUpdateInterval interface query failed " +
+                $"(HRESULT 0x{result.HResult:X8}); system default remains active",
+            _ =>
+                $"[window-capture] MinUpdateInterval apply failed " +
+                $"(HRESULT 0x{result.HResult:X8}); system default remains active",
+        };
+    }
+
+    internal static string WindowFrameDeliveryRate(WindowFrameDeliveryRateSample sample)
+    {
+        string framesPerSecond = sample.FramesPerSecond.ToString("0.0", CultureInfo.InvariantCulture);
+        string elapsedSeconds = sample.ElapsedSeconds.ToString("0.0", CultureInfo.InvariantCulture);
+        return $"[window-capture] frame delivery: {framesPerSecond} fps " +
+               $"({sample.FrameCount} frames in {elapsedSeconds}s)";
+    }
 }
