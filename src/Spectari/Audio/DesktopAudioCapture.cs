@@ -32,14 +32,38 @@ internal sealed class DefaultAudioDeviceChangePolicy
     internal void MarkUnbound() => BoundDeviceId = null;
 }
 
-/// <summary>
-/// Captures the current default Windows render endpoint through WASAPI loopback.
-/// Output is 48 kHz stereo float32, matching the process capture and ffmpeg input.
-/// The default endpoint identity is checked while streaming, and the WASAPI client
-/// is rebound in place when it changes. Silence advances the raw-audio timeline
-/// while no endpoint is available or a replacement is being opened.
-/// </summary>
 internal sealed class DesktopAudioCapture : IDisposable
+{
+    private readonly WasapiEndpointAudioCapture _capture;
+
+    internal DesktopAudioCapture(long videoEpochTicks, Action<byte[], int> onSamples) =>
+        _capture = new WasapiEndpointAudioCapture(null, videoEpochTicks, onSamples);
+
+    public void Dispose() => _capture.Dispose();
+}
+
+internal sealed class CaptureDeviceAudioCapture : IDisposable
+{
+    private readonly WasapiEndpointAudioCapture _capture;
+
+    internal CaptureDeviceAudioCapture(
+        string deviceId,
+        long videoEpochTicks,
+        Action<byte[], int> onSamples)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(deviceId);
+        _capture = new WasapiEndpointAudioCapture(deviceId, videoEpochTicks, onSamples);
+    }
+
+    public void Dispose() => _capture.Dispose();
+}
+
+/// <summary>
+/// Captures either the current default render endpoint through loopback or one
+/// selected capture endpoint. Both modes emit the same 48 kHz stereo float32
+/// stream and share timeline, queue, overflow, and silence-fill behavior.
+/// </summary>
+internal sealed class WasapiEndpointAudioCapture : IDisposable
 {
     private const int SampleRate = ProcessAudioCapture.SampleRate;
     private const int Channels = ProcessAudioCapture.Channels;
@@ -47,6 +71,7 @@ internal sealed class DesktopAudioCapture : IDisposable
     private const long MaxCatchupBytes = SampleRate * BytesPerFrame * 2;
     private static readonly byte[] SilenceBlock = new byte[SampleRate * BytesPerFrame / 100];
 
+    private readonly string? _audioInputDeviceId;
     private readonly Action<byte[], int> _onSamples;
     private readonly BlockingCollection<(byte[] Buffer, int Length)> _queue = new(256);
     private readonly CancellationTokenSource _cts = new();
@@ -58,8 +83,12 @@ internal sealed class DesktopAudioCapture : IDisposable
     private long _owedSilenceBytes;
     private int _disposed;
 
-    internal DesktopAudioCapture(long videoEpochTicks, Action<byte[], int> onSamples)
+    internal WasapiEndpointAudioCapture(
+        string? audioInputDeviceId,
+        long videoEpochTicks,
+        Action<byte[], int> onSamples)
     {
+        _audioInputDeviceId = audioInputDeviceId;
         _onSamples = onSamples;
         _captureStartTicks = Stopwatch.GetTimestamp();
         _leadInFrames = ProcessAudioCapture.GetLeadInFrames(videoEpochTicks, _captureStartTicks);
@@ -77,7 +106,9 @@ internal sealed class DesktopAudioCapture : IDisposable
         _writerThread = new Thread(WriteLoop)
         {
             IsBackground = true,
-            Name = "desktop-audio-writer",
+            Name = audioInputDeviceId is null
+                ? "desktop-audio-writer"
+                : "capture-input-audio-writer",
             Priority = ThreadPriority.AboveNormal,
         };
         _writerThread.Start();
@@ -85,7 +116,9 @@ internal sealed class DesktopAudioCapture : IDisposable
         _captureThread = new Thread(CaptureLoop)
         {
             IsBackground = true,
-            Name = "desktop-audio-capture",
+            Name = audioInputDeviceId is null
+                ? "desktop-audio-capture"
+                : "capture-input-audio-capture",
             Priority = ThreadPriority.Highest,
         };
         _captureThread.Start();
@@ -96,17 +129,20 @@ internal sealed class DesktopAudioCapture : IDisposable
         const int COINIT_MULTITHREADED = 0;
         int initializeHr = CoInitializeEx(IntPtr.Zero, COINIT_MULTITHREADED);
         bool comInitialized = initializeHr >= 0;
-        IMMDeviceEnumerator? enumerator = null;
-        DesktopAudioBinding? binding = null;
+        nint enumerator = 0;
+        WasapiAudioBinding? binding = null;
         IntPtr mmcss = IntPtr.Zero;
 
         try
         {
             Marshal.ThrowExceptionForHR(initializeHr);
-            enumerator = (IMMDeviceEnumerator)(object)new MMDeviceEnumeratorComObject();
+            Marshal.ThrowExceptionForHR(CoreAudioInterop.CreateDeviceEnumerator(out enumerator));
             mmcss = ConfigureMmcss();
+            string sourceLabel = _audioInputDeviceId is null
+                ? "desktop loopback"
+                : "capture device input";
             Console.WriteLine(
-                $"[audio] capture started (desktop loopback, 48 kHz stereo{(mmcss != IntPtr.Zero ? ", MMCSS Pro Audio" : ", thread priority Highest")})");
+                $"[audio] capture started ({sourceLabel}, 48 kHz stereo{(mmcss != IntPtr.Zero ? ", MMCSS Pro Audio" : ", thread priority Highest")})");
 
             var devicePolicy = new DefaultAudioDeviceChangePolicy();
             bool endpointFailureLogged = false;
@@ -126,10 +162,11 @@ internal sealed class DesktopAudioCapture : IDisposable
                 if (binding is null || now >= nextDefaultCheckTicks)
                 {
                     nextDefaultCheckTicks = now + checkIntervalTicks;
-                    string? defaultDeviceId;
+                    string? targetDeviceId;
                     try
                     {
-                        defaultDeviceId = GetDefaultRenderDeviceId(enumerator);
+                        targetDeviceId = _audioInputDeviceId
+                            ?? GetDefaultRenderDeviceId(enumerator);
                     }
                     catch (Exception ex)
                     {
@@ -145,24 +182,27 @@ internal sealed class DesktopAudioCapture : IDisposable
                         continue;
                     }
 
-                    DefaultAudioDeviceChangeAction action = devicePolicy.Evaluate(defaultDeviceId);
+                    DefaultAudioDeviceChangeAction action = devicePolicy.Evaluate(targetDeviceId);
                     if (action != DefaultAudioDeviceChangeAction.None)
                     {
-                        bool replacingDevice = binding is not null && defaultDeviceId is not null;
+                        bool replacingDevice = binding is not null && targetDeviceId is not null;
                         ReleaseBinding(ref binding, devicePolicy);
                         EmitSilenceToWallClock(now);
                         idle = false;
 
-                        if (replacingDevice)
+                        if (replacingDevice && _audioInputDeviceId is null)
                             Console.WriteLine("[audio] default output device changed; switching desktop audio capture");
 
-                        if (action == DefaultAudioDeviceChangeAction.Bind && defaultDeviceId is not null)
+                        if (action == DefaultAudioDeviceChangeAction.Bind && targetDeviceId is not null)
                         {
                             try
                             {
-                                binding = DesktopAudioBinding.Open(enumerator, defaultDeviceId);
+                                binding = WasapiAudioBinding.Open(
+                                    enumerator,
+                                    targetDeviceId,
+                                    loopback: _audioInputDeviceId is null);
                                 EmitSilenceToWallClock(binding.StartTicks);
-                                devicePolicy.MarkBound(defaultDeviceId);
+                                devicePolicy.MarkBound(targetDeviceId);
                                 endpointFailureLogged = false;
                                 readFailureLogged = false;
                                 lastPacketTicks = binding.StartTicks;
@@ -172,8 +212,11 @@ internal sealed class DesktopAudioCapture : IDisposable
                                 if (!endpointFailureLogged)
                                 {
                                     endpointFailureLogged = true;
+                                    string failureSource = _audioInputDeviceId is null
+                                        ? "desktop loopback device"
+                                        : "selected capture input";
                                     Console.Error.WriteLine(
-                                        $"[audio] desktop loopback device open failed ({ex.Message}); feeding silence and retrying.");
+                                        $"[audio] {failureSource} open failed ({ex.Message}); feeding silence and retrying.");
                                 }
                             }
                         }
@@ -197,14 +240,19 @@ internal sealed class DesktopAudioCapture : IDisposable
                 bool bindingFailed = false;
                 while (true)
                 {
-                    int hr = binding.Capture.GetNextPacketSize(out uint packetFrames);
+                    int hr = CoreAudioInterop.GetNextPacketSize(
+                        binding.Capture,
+                        out uint packetFrames);
                     if (hr < 0)
                     {
                         if (!readFailureLogged)
                         {
                             readFailureLogged = true;
+                            string recovery = _audioInputDeviceId is null
+                                ? "rebinding the default output device"
+                                : "reopening the selected capture input";
                             Console.Error.WriteLine(
-                                $"[audio] desktop loopback read failed (0x{hr:X8}); rebinding the default output device.");
+                                $"[audio] {sourceLabel} read failed (0x{hr:X8}); {recovery}.");
                         }
                         ReleaseBinding(ref binding, devicePolicy);
                         bindingFailed = true;
@@ -212,15 +260,21 @@ internal sealed class DesktopAudioCapture : IDisposable
                     }
                     if (packetFrames == 0) break;
 
-                    hr = binding.Capture.GetBuffer(
-                        out IntPtr data, out uint frames, out uint flags, out _, out _);
+                    hr = CoreAudioInterop.GetCaptureBuffer(
+                        binding.Capture,
+                        out nint data,
+                        out uint frames,
+                        out uint flags);
                     if (hr < 0)
                     {
                         if (!readFailureLogged)
                         {
                             readFailureLogged = true;
+                            string recovery = _audioInputDeviceId is null
+                                ? "rebinding the default output device"
+                                : "reopening the selected capture input";
                             Console.Error.WriteLine(
-                                $"[audio] desktop loopback read failed (0x{hr:X8}); rebinding the default output device.");
+                                $"[audio] {sourceLabel} read failed (0x{hr:X8}); {recovery}.");
                         }
                         ReleaseBinding(ref binding, devicePolicy);
                         bindingFailed = true;
@@ -239,7 +293,8 @@ internal sealed class DesktopAudioCapture : IDisposable
                     }
                     finally
                     {
-                        binding?.Capture.ReleaseBuffer(frames);
+                        if (binding is not null)
+                            _ = CoreAudioInterop.ReleaseCaptureBuffer(binding.Capture, frames);
                     }
                 }
 
@@ -278,7 +333,7 @@ internal sealed class DesktopAudioCapture : IDisposable
             if (!_cts.IsCancellationRequested)
             {
                 Console.Error.WriteLine(
-                    $"[audio] desktop capture thread stopped on error ({ex.Message}); feeding silence instead.");
+                    $"[audio] {(_audioInputDeviceId is null ? "desktop" : "capture input")} capture thread stopped on error ({ex.Message}); feeding silence instead.");
                 while (!_cts.IsCancellationRequested)
                 {
                     EmitSilenceToWallClock(Stopwatch.GetTimestamp());
@@ -289,17 +344,14 @@ internal sealed class DesktopAudioCapture : IDisposable
         finally
         {
             binding?.Dispose();
-            if (enumerator is not null)
-            {
-                try { Marshal.FinalReleaseComObject(enumerator); } catch { }
-            }
+            CoreAudioInterop.Release(ref enumerator);
             RevertMmcss(mmcss);
             if (comInitialized) CoUninitialize();
         }
     }
 
     private static void ReleaseBinding(
-        ref DesktopAudioBinding? binding,
+        ref WasapiAudioBinding? binding,
         DefaultAudioDeviceChangePolicy devicePolicy)
     {
         binding?.Dispose();
@@ -307,23 +359,32 @@ internal sealed class DesktopAudioCapture : IDisposable
         devicePolicy.MarkUnbound();
     }
 
-    private static string? GetDefaultRenderDeviceId(IMMDeviceEnumerator enumerator)
+    private static string? GetDefaultRenderDeviceId(nint enumerator)
     {
         const int E_RENDER = 0;
         const int E_CONSOLE = 0;
         const int HRESULT_NOT_FOUND = unchecked((int)0x80070490);
 
-        int hr = enumerator.GetDefaultAudioEndpoint(E_RENDER, E_CONSOLE, out IMMDevice device);
-        if (hr == HRESULT_NOT_FOUND) return null;
+        nint device = 0;
+        int hr = CoreAudioInterop.GetDefaultAudioEndpoint(
+            enumerator,
+            E_RENDER,
+            E_CONSOLE,
+            out device);
+        if (hr == HRESULT_NOT_FOUND)
+        {
+            CoreAudioInterop.Release(ref device);
+            return null;
+        }
         Marshal.ThrowExceptionForHR(hr);
         try
         {
-            Marshal.ThrowExceptionForHR(device.GetId(out string deviceId));
+            Marshal.ThrowExceptionForHR(CoreAudioInterop.GetDeviceId(device, out string deviceId));
             return deviceId;
         }
         finally
         {
-            try { Marshal.FinalReleaseComObject(device); } catch { }
+            CoreAudioInterop.Release(ref device);
         }
     }
 
@@ -381,7 +442,7 @@ internal sealed class DesktopAudioCapture : IDisposable
             {
                 overflowLogged = true;
                 Console.Error.WriteLine(
-                    "[audio] encoder is not draining desktop audio; dropping stale audio to stay at the live edge; backfilling silence to resync.");
+                    $"[audio] encoder is not draining {(_audioInputDeviceId is null ? "desktop audio" : "capture input audio")}; dropping stale audio to stay at the live edge; backfilling silence to resync.");
             }
         }
 
@@ -431,14 +492,14 @@ internal sealed class DesktopAudioCapture : IDisposable
         if (captureStopped) _cts.Dispose();
     }
 
-    private sealed class DesktopAudioBinding : IDisposable
+    private sealed class WasapiAudioBinding : IDisposable
     {
-        private readonly IAudioClient _client;
+        private nint _client;
         private int _disposed;
 
-        private DesktopAudioBinding(
-            IAudioClient client,
-            IAudioCaptureClient capture,
+        private WasapiAudioBinding(
+            nint client,
+            nint capture,
             long startTicks)
         {
             _client = client;
@@ -446,89 +507,86 @@ internal sealed class DesktopAudioCapture : IDisposable
             StartTicks = startTicks;
         }
 
-        internal IAudioCaptureClient Capture { get; }
+        internal nint Capture { get; private set; }
         internal long StartTicks { get; }
 
-        internal static DesktopAudioBinding Open(
-            IMMDeviceEnumerator enumerator,
-            string deviceId)
+        internal static WasapiAudioBinding Open(
+            nint enumerator,
+            string deviceId,
+            bool loopback)
         {
-            Marshal.ThrowExceptionForHR(enumerator.GetDevice(deviceId, out IMMDevice device));
-            IAudioClient? client = null;
-            IAudioCaptureClient? capture = null;
+            nint device = 0;
+            Marshal.ThrowExceptionForHR(CoreAudioInterop.GetDevice(
+                enumerator,
+                deviceId,
+                out device));
+            nint client = 0;
+            nint capture = 0;
             bool started = false;
             try
             {
-                var audioClientIid = typeof(IAudioClient).GUID;
-                const uint CLSCTX_ALL = 23;
-                Marshal.ThrowExceptionForHR(device.Activate(
-                    ref audioClientIid, CLSCTX_ALL, IntPtr.Zero, out object activated));
-                client = (IAudioClient)activated;
+                Marshal.ThrowExceptionForHR(CoreAudioInterop.Activate(
+                    device,
+                    CoreAudioInterop.AudioClientId,
+                    out client));
 
-                var format = new WAVEFORMATEX
+                var format = new CoreAudioInterop.WaveFormatEx
                 {
-                    wFormatTag = 3,
-                    nChannels = Channels,
-                    nSamplesPerSec = SampleRate,
-                    nAvgBytesPerSec = SampleRate * BytesPerFrame,
-                    nBlockAlign = BytesPerFrame,
-                    wBitsPerSample = 32,
+                    FormatTag = 3,
+                    Channels = Channels,
+                    SamplesPerSec = SampleRate,
+                    AvgBytesPerSec = SampleRate * BytesPerFrame,
+                    BlockAlign = BytesPerFrame,
+                    BitsPerSample = 32,
                 };
 
                 const uint AUDCLNT_STREAMFLAGS_LOOPBACK = 0x00020000;
                 const uint AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM = 0x80000000;
                 const uint AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY = 0x08000000;
                 const long BUFFER_DURATION_100NS = 5_000_000;
-                uint streamFlags = AUDCLNT_STREAMFLAGS_LOOPBACK
-                    | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+                uint streamFlags = AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
                     | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
-                Marshal.ThrowExceptionForHR(client.Initialize(
-                    0, streamFlags, BUFFER_DURATION_100NS, 0, ref format, IntPtr.Zero));
+                if (loopback) streamFlags |= AUDCLNT_STREAMFLAGS_LOOPBACK;
+                Marshal.ThrowExceptionForHR(CoreAudioInterop.InitializeAudioClient(
+                    client,
+                    streamFlags,
+                    BUFFER_DURATION_100NS,
+                    ref format));
 
-                var captureIid = typeof(IAudioCaptureClient).GUID;
-                Marshal.ThrowExceptionForHR(client.GetService(ref captureIid, out IntPtr capturePtr));
-                try
-                {
-                    capture = (IAudioCaptureClient)Marshal.GetObjectForIUnknown(capturePtr);
-                }
-                finally
-                {
-                    Marshal.Release(capturePtr);
-                }
+                Marshal.ThrowExceptionForHR(CoreAudioInterop.GetAudioClientService(
+                    client,
+                    CoreAudioInterop.AudioCaptureClientId,
+                    out capture));
 
                 long startTicks = Stopwatch.GetTimestamp();
-                Marshal.ThrowExceptionForHR(client.Start());
+                Marshal.ThrowExceptionForHR(CoreAudioInterop.StartAudioClient(client));
                 started = true;
-                return new DesktopAudioBinding(client, capture, startTicks);
+                return new WasapiAudioBinding(client, capture, startTicks);
             }
             catch
             {
-                if (started && client is not null)
+                if (started && client != 0)
                 {
-                    try { client.Stop(); } catch { }
+                    try { _ = CoreAudioInterop.StopAudioClient(client); } catch { }
                 }
-                if (capture is not null)
-                {
-                    try { Marshal.FinalReleaseComObject(capture); } catch { }
-                }
-                if (client is not null)
-                {
-                    try { Marshal.FinalReleaseComObject(client); } catch { }
-                }
+                CoreAudioInterop.Release(ref capture);
+                CoreAudioInterop.Release(ref client);
                 throw;
             }
             finally
             {
-                try { Marshal.FinalReleaseComObject(device); } catch { }
+                CoreAudioInterop.Release(ref device);
             }
         }
 
         public void Dispose()
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-            try { _client.Stop(); } catch { }
-            try { Marshal.FinalReleaseComObject(Capture); } catch { }
-            try { Marshal.FinalReleaseComObject(_client); } catch { }
+            try { _ = CoreAudioInterop.StopAudioClient(_client); } catch { }
+            nint capture = Capture;
+            Capture = 0;
+            CoreAudioInterop.Release(ref capture);
+            CoreAudioInterop.Release(ref _client);
         }
     }
 
@@ -563,75 +621,4 @@ internal sealed class DesktopAudioCapture : IDisposable
     [DllImport("avrt.dll", SetLastError = true)]
     private static extern bool AvRevertMmThreadCharacteristics(IntPtr avrtHandle);
 
-    [ComImport]
-    [Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
-    private sealed class MMDeviceEnumeratorComObject;
-
-    [ComImport]
-    [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IMMDeviceEnumerator
-    {
-        [PreserveSig] int EnumAudioEndpoints(int dataFlow, uint stateMask, out IntPtr devices);
-        [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice device);
-        [PreserveSig] int GetDevice([MarshalAs(UnmanagedType.LPWStr)] string id, out IMMDevice device);
-        [PreserveSig] int RegisterEndpointNotificationCallback(IntPtr client);
-        [PreserveSig] int UnregisterEndpointNotificationCallback(IntPtr client);
-    }
-
-    [ComImport]
-    [Guid("D666063F-1587-4E43-81F1-B948E807363F")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IMMDevice
-    {
-        [PreserveSig] int Activate(
-            ref Guid iid,
-            uint classContext,
-            IntPtr activationParameters,
-            [MarshalAs(UnmanagedType.IUnknown)] out object activatedInterface);
-        [PreserveSig] int OpenPropertyStore(uint access, out IntPtr properties);
-        [PreserveSig] int GetId([MarshalAs(UnmanagedType.LPWStr)] out string id);
-        [PreserveSig] int GetState(out uint state);
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct WAVEFORMATEX
-    {
-        public ushort wFormatTag;
-        public ushort nChannels;
-        public uint nSamplesPerSec;
-        public uint nAvgBytesPerSec;
-        public ushort nBlockAlign;
-        public ushort wBitsPerSample;
-        public ushort cbSize;
-    }
-
-    [ComImport]
-    [Guid("1CB9AD4C-DBFA-4C32-B178-C2F568A703B2")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IAudioClient
-    {
-        [PreserveSig] int Initialize(int shareMode, uint streamFlags, long bufferDuration, long periodicity, ref WAVEFORMATEX format, IntPtr audioSessionGuid);
-        [PreserveSig] int GetBufferSize(out uint bufferFrames);
-        [PreserveSig] int GetStreamLatency(out long latency);
-        [PreserveSig] int GetCurrentPadding(out uint padding);
-        [PreserveSig] int IsFormatSupported(int shareMode, ref WAVEFORMATEX format, IntPtr closestMatch);
-        [PreserveSig] int GetMixFormat(out IntPtr format);
-        [PreserveSig] int GetDevicePeriod(out long defaultPeriod, out long minimumPeriod);
-        [PreserveSig] int Start();
-        [PreserveSig] int Stop();
-        [PreserveSig] int Reset();
-        [PreserveSig] int SetEventHandle(IntPtr eventHandle);
-        [PreserveSig] int GetService(ref Guid iid, out IntPtr service);
-    }
-
-    [ComImport]
-    [Guid("C8ADBD64-E71E-48A0-A4DE-185C395CD317")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IAudioCaptureClient
-    {
-        [PreserveSig] int GetBuffer(out IntPtr data, out uint frames, out uint flags, out ulong devicePosition, out ulong qpcPosition);
-        [PreserveSig] int ReleaseBuffer(uint frames);
-        [PreserveSig] int GetNextPacketSize(out uint frames);
-    }
 }

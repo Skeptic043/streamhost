@@ -985,7 +985,7 @@ public sealed class MainForm : Form
     {
         var preset = (Preset)_presetCombo.SelectedItem!;
 
-        // Resolve the audio source: none / follow captured window / desktop / a specific app.
+        // Resolve the audio source: none / captured window / desktop / capture input / app.
         // "Captured window's audio" during a monitor share resolves to no audio.
         uint audioPid = _sourceSelection.SelectedAudioPid;
         if (_sourceSelection.IsSelectedAudioProcessUnavailable)
@@ -1040,6 +1040,7 @@ public sealed class MainForm : Form
             StreamName = _nameInput.Text.Trim(),
             AudioPid = audioPid,
             CaptureDesktopAudio = _sourceSelection.IsDesktopAudioSelected,
+            AudioInputDeviceId = _sourceSelection.SelectedAudioInputDeviceId ?? "",
             Fps = preset.Fps,
             BitrateKbps = (_bitrateCombo.SelectedItem as BitrateChoice)?.Kbps ?? 0, // 0 = session auto (Medium)
             OutHeight = preset.Height,

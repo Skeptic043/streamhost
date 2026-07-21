@@ -23,6 +23,7 @@ public sealed record SessionConfig
     public string StreamName { get; init; } = "";
     public uint AudioPid { get; init; }
     public bool CaptureDesktopAudio { get; init; }
+    public string AudioInputDeviceId { get; init; } = "";
     public int Fps { get; init; } = 60;
 
     /// <summary>0 = pick automatically from the actual output resolution.</summary>
@@ -239,7 +240,10 @@ public sealed class StreamSession
             Console.WriteLine($"[encoder] auto bitrate for {outH}p{fps}: {bitrateKbps} kbps");
 
         AudioPipeline? audioPipeline = AudioPipeline.Create(
-            _config.AudioPid, _config.CaptureDesktopAudio, _config.Port);
+            _config.AudioPid,
+            _config.CaptureDesktopAudio,
+            _config.AudioInputDeviceId,
+            _config.Port);
         string? audioPipeName = audioPipeline?.PipeName;
 
         // Declared before the downstream lifetimes so audio stops after they do.

@@ -1,3 +1,4 @@
+using Spectari.Audio;
 using Spectari.Capture;
 using Xunit;
 
@@ -207,6 +208,90 @@ public sealed class SourceSelectionModelTests
             ],
             model.AudioDisplayItems);
         Assert.Equal(0u, model.SelectedAudioPid);
+    }
+
+    [Fact]
+    public void CaptureAudioInputsAppearBeforeProcessEntriesAndMapByStableId()
+    {
+        var model = Model(
+            () => [Window(1, "game", 11, "Game title")],
+            () => [],
+            () => [],
+            () =>
+            [
+                AudioDevice("card-b", "Bravo Card"),
+                AudioDevice("card-a", "Alpha Card"),
+            ]);
+        model.RefreshAll();
+
+        Assert.Equal(
+            [
+                "No audio",
+                "Captured window's audio",
+                "Desktop audio (all sound)",
+                "Capture device audio - Alpha Card",
+                "Capture device audio - Bravo Card",
+                "game - Game title",
+            ],
+            model.AudioDisplayItems);
+
+        model.SelectAudioIndex(4);
+
+        Assert.Equal("input:card-b", model.AudioKey);
+        Assert.Equal("card-b", model.SelectedAudioInputDeviceId);
+        Assert.Equal(0u, model.SelectedAudioPid);
+        Assert.Equal(4, model.SelectedAudioIndex);
+
+        model.SelectKind(SourceKind.CaptureDevice);
+
+        Assert.Equal(3, model.SelectedAudioIndex);
+    }
+
+    [Fact]
+    public void PersistedCaptureAudioSelectionSurvivesRestartAndDeviceReordering()
+    {
+        List<AudioInputDeviceDescription> devices =
+        [
+            AudioDevice("card-a", "Alpha Card"),
+            AudioDevice("card-b", "Bravo Card"),
+        ];
+        var model = Model(() => [], () => [], () => [], () => devices);
+        model.RefreshAll();
+        model.SelectKind(SourceKind.CaptureDevice);
+        model.SelectAudioIndex(3);
+        string persistedKey = model.AudioKey;
+
+        devices =
+        [
+            AudioDevice("card-b", "Aardvark Card"),
+            AudioDevice("card-a", "Zulu Card"),
+        ];
+        var restored = Model(() => [], () => [], () => [], () => devices);
+        restored.RefreshAll();
+        restored.SelectKind(SourceKind.CaptureDevice);
+        restored.SelectAudioKey(persistedKey);
+
+        Assert.Equal("input:card-b", persistedKey);
+        Assert.Equal("card-b", restored.SelectedAudioInputDeviceId);
+        Assert.Equal(2, restored.SelectedAudioIndex);
+    }
+
+    [Fact]
+    public void MissingCaptureAudioInputFallsBackWithoutAProcessUnavailableWarning()
+    {
+        List<AudioInputDeviceDescription> devices = [AudioDevice("card-a", "Capture Card")];
+        var model = Model(() => [], () => [], () => [], () => devices);
+        model.RefreshAll();
+        model.SelectKind(SourceKind.CaptureDevice);
+        model.SelectAudioIndex(2);
+
+        devices = [];
+        model.RefreshAudioInputDevices();
+
+        Assert.Equal(SourceSelectionModel.CapturedWindowAudioKey, model.AudioKey);
+        Assert.Null(model.SelectedAudioInputDeviceId);
+        Assert.False(model.IsSelectedAudioProcessUnavailable);
+        Assert.Equal(0, model.SelectedAudioIndex);
     }
 
     [Theory]
@@ -468,6 +553,14 @@ public sealed class SourceSelectionModelTests
         Func<List<CaptureDeviceDescription>> captureDevices,
         uint ownPid = 999) => new(windows, monitors, captureDevices, ownPid);
 
+    private static SourceSelectionModel Model(
+        Func<List<WindowDescription>> windows,
+        Func<List<MonitorDescription>> monitors,
+        Func<List<CaptureDeviceDescription>> captureDevices,
+        Func<List<AudioInputDeviceDescription>> audioInputDevices,
+        uint ownPid = 999) =>
+        new(windows, monitors, captureDevices, audioInputDevices, ownPid);
+
     private static WindowDescription Window(
         int handle,
         string process,
@@ -482,4 +575,7 @@ public sealed class SourceSelectionModelTests
 
     private static CaptureDeviceDescription Device(string symbolicLink, string friendlyName) =>
         new(symbolicLink, friendlyName);
+
+    private static AudioInputDeviceDescription AudioDevice(string id, string friendlyName) =>
+        new(id, friendlyName, AudioEndpointFormFactor.Unknown);
 }

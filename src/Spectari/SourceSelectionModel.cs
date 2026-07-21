@@ -1,3 +1,4 @@
+using Spectari.Audio;
 using Spectari.Capture;
 
 namespace Spectari;
@@ -32,15 +33,19 @@ internal sealed class SourceSelectionModel
     // A colon cannot occur in a Windows process name, so this persisted mode
     // key cannot be mistaken for one of the per-app selections.
     internal const string DesktopAudioKey = "mode:desktop";
+    internal const string AudioInputDeviceKeyPrefix = "input:";
 
     private readonly Func<List<WindowDescription>> _enumerateWindows;
     private readonly Func<List<MonitorDescription>> _enumerateMonitors;
     private readonly Func<List<CaptureDeviceDescription>> _enumerateCaptureDevices;
+    private readonly Func<List<AudioInputDeviceDescription>> _enumerateAudioInputDevices;
     private readonly uint _ownPid;
     private List<WindowDescription> _windows = [];
     private List<MonitorDescription> _monitors = [];
     private List<CaptureDeviceDescription> _captureDevices = [];
     private List<string> _captureDeviceDisplayItems = [];
+    private List<AudioInputDeviceDescription> _audioInputDevices = [];
+    private List<string> _audioInputDeviceDisplayItems = [];
     private IntPtr? _selectedWindowHandle;
     private string? _selectedMonitorDeviceName;
     private string? _selectedCaptureDeviceSymbolicLink;
@@ -51,6 +56,7 @@ internal sealed class SourceSelectionModel
             WindowEnumerator.EnumerateWindows,
             MonitorEnumerator.GetMonitors,
             CaptureDeviceEnumerator.GetDevices,
+            AudioInputDeviceEnumerator.GetDevices,
             (uint)Environment.ProcessId)
     {
     }
@@ -59,7 +65,7 @@ internal sealed class SourceSelectionModel
         Func<List<WindowDescription>> enumerateWindows,
         Func<List<MonitorDescription>> enumerateMonitors,
         uint ownPid)
-        : this(enumerateWindows, enumerateMonitors, () => [], ownPid)
+        : this(enumerateWindows, enumerateMonitors, () => [], () => [], ownPid)
     {
     }
 
@@ -68,10 +74,21 @@ internal sealed class SourceSelectionModel
         Func<List<MonitorDescription>> enumerateMonitors,
         Func<List<CaptureDeviceDescription>> enumerateCaptureDevices,
         uint ownPid)
+        : this(enumerateWindows, enumerateMonitors, enumerateCaptureDevices, () => [], ownPid)
+    {
+    }
+
+    internal SourceSelectionModel(
+        Func<List<WindowDescription>> enumerateWindows,
+        Func<List<MonitorDescription>> enumerateMonitors,
+        Func<List<CaptureDeviceDescription>> enumerateCaptureDevices,
+        Func<List<AudioInputDeviceDescription>> enumerateAudioInputDevices,
+        uint ownPid)
     {
         _enumerateWindows = enumerateWindows;
         _enumerateMonitors = enumerateMonitors;
         _enumerateCaptureDevices = enumerateCaptureDevices;
+        _enumerateAudioInputDevices = enumerateAudioInputDevices;
         _ownPid = ownPid;
     }
 
@@ -79,6 +96,7 @@ internal sealed class SourceSelectionModel
     internal IReadOnlyList<WindowDescription> Windows => _windows;
     internal IReadOnlyList<MonitorDescription> Monitors => _monitors;
     internal IReadOnlyList<CaptureDeviceDescription> CaptureDevices => _captureDevices;
+    internal IReadOnlyList<AudioInputDeviceDescription> AudioInputDevices => _audioInputDevices;
     internal IReadOnlyList<string> WindowDisplayItems => _windows.Select(FormatWindow).ToArray();
     internal IReadOnlyList<string> MonitorDisplayItems => _monitors.Select(FormatMonitor).ToArray();
     internal IReadOnlyList<string> CaptureDeviceDisplayItems => _captureDeviceDisplayItems;
@@ -89,24 +107,28 @@ internal sealed class SourceSelectionModel
             "No audio",
             "Captured window's audio",
             "Desktop audio (all sound)",
+            .. _audioInputDeviceDisplayItems,
             .. _windows.Select(FormatAudioWindow),
         ],
         SourceKind.Monitor =>
         [
             "No audio (monitor share: pick an app below)",
             "Desktop audio (all sound)",
+            .. _audioInputDeviceDisplayItems,
             .. _windows.Select(FormatAudioWindow),
         ],
         SourceKind.CaptureDevice =>
         [
             "No audio (capture device share: pick an app below)",
             "Desktop audio (all sound)",
+            .. _audioInputDeviceDisplayItems,
             .. _windows.Select(FormatAudioWindow),
         ],
         _ =>
         [
             "No audio (pick an app below)",
             "Desktop audio (all sound)",
+            .. _audioInputDeviceDisplayItems,
             .. _windows.Select(FormatAudioWindow),
         ],
     };
@@ -130,8 +152,12 @@ internal sealed class SourceSelectionModel
             if (_audioKey == NoAudioKey) return 0;
             if (_audioKey == CapturedWindowAudioKey) return Kind == SourceKind.Window ? 1 : 0;
             if (_audioKey == DesktopAudioKey) return Kind == SourceKind.Window ? 2 : 1;
+            int fixedOffset = Kind == SourceKind.Window ? 3 : 2;
+            int inputIndex = _audioInputDevices.FindIndex(device =>
+                AudioInputDeviceIdentityEquals(device.Id, AudioInputDeviceIdFromKey(_audioKey)));
+            if (inputIndex >= 0) return fixedOffset + inputIndex;
             int index = _windows.FindIndex(window => AudioIdentityEquals(window.ProcessName, _audioKey));
-            int processOffset = Kind == SourceKind.Window ? 3 : 2;
+            int processOffset = fixedOffset + _audioInputDevices.Count;
             return index >= 0 ? index + processOffset : Kind == SourceKind.Window ? 1 : 0;
         }
     }
@@ -176,8 +202,21 @@ internal sealed class SourceSelectionModel
 
     internal bool IsDesktopAudioSelected => _audioKey == DesktopAudioKey;
 
+    internal string? SelectedAudioInputDeviceId
+    {
+        get
+        {
+            string? selectedId = AudioInputDeviceIdFromKey(_audioKey);
+            return selectedId is null
+                ? null
+                : _audioInputDevices.FirstOrDefault(device =>
+                    AudioInputDeviceIdentityEquals(device.Id, selectedId))?.Id;
+        }
+    }
+
     internal bool IsSelectedAudioProcessUnavailable =>
         _audioKey is not (NoAudioKey or CapturedWindowAudioKey or DesktopAudioKey)
+        && !IsAudioInputDeviceKey(_audioKey)
         && SelectedAudioPid == 0;
 
     internal void RefreshAll()
@@ -201,6 +240,7 @@ internal sealed class SourceSelectionModel
             _selectedWindowHandle = processIndex >= 0 ? _windows[processIndex].Handle
                 : _windows.Count > 0 ? _windows[0].Handle : null;
         }
+        RefreshAudioInputDevices();
         NormalizeAudioSelection();
     }
 
@@ -229,14 +269,29 @@ internal sealed class SourceSelectionModel
         }
     }
 
+    internal void RefreshAudioInputDevices() =>
+        RefreshAudioInputDevices(_enumerateAudioInputDevices());
+
+    internal void RefreshAudioInputDevices(IEnumerable<AudioInputDeviceDescription> devices)
+    {
+        IReadOnlyList<AudioInputDeviceDisplayItem> items =
+            AudioInputDevicePolicy.PrepareDisplayItems(devices);
+        _audioInputDevices = items.Select(item => item.Device).ToList();
+        _audioInputDeviceDisplayItems = items.Select(item => item.DisplayName).ToList();
+        NormalizeAudioSelection();
+    }
+
     internal SourceSelectionModel CreateFreshSnapshot()
     {
         IReadOnlyList<CaptureDeviceDisplayItem> captureDeviceItems =
             CaptureDevicePolicy.PrepareDisplayItems(_enumerateCaptureDevices());
+        IReadOnlyList<AudioInputDeviceDisplayItem> audioInputDeviceItems =
+            AudioInputDevicePolicy.PrepareDisplayItems(_enumerateAudioInputDevices());
         var snapshot = new SourceSelectionModel(
             _enumerateWindows,
             _enumerateMonitors,
             _enumerateCaptureDevices,
+            _enumerateAudioInputDevices,
             _ownPid)
         {
             Kind = Kind,
@@ -248,6 +303,8 @@ internal sealed class SourceSelectionModel
             _monitors = [.. _enumerateMonitors()],
             _captureDevices = captureDeviceItems.Select(item => item.Device).ToList(),
             _captureDeviceDisplayItems = captureDeviceItems.Select(item => item.DisplayName).ToList(),
+            _audioInputDevices = audioInputDeviceItems.Select(item => item.Device).ToList(),
+            _audioInputDeviceDisplayItems = audioInputDeviceItems.Select(item => item.DisplayName).ToList(),
         };
         if (snapshot.SelectedWindowIndex < 0) snapshot._selectedWindowHandle = null;
         if (snapshot.SelectedMonitorIndex < 0) snapshot._selectedMonitorDeviceName = null;
@@ -298,22 +355,34 @@ internal sealed class SourceSelectionModel
 
     internal void SelectAudioIndex(int index)
     {
-        _audioKey = Kind == SourceKind.Window
-            ? index switch
-            {
-                0 => NoAudioKey,
-                1 => CapturedWindowAudioKey,
-                2 => DesktopAudioKey,
-                > 2 when index - 3 < _windows.Count => _windows[index - 3].ProcessName,
-                _ => CapturedWindowAudioKey,
-            }
-            : index switch
-            {
-                0 => NoAudioKey,
-                1 => DesktopAudioKey,
-                > 1 when index - 2 < _windows.Count => _windows[index - 2].ProcessName,
-                _ => CapturedWindowAudioKey,
-            };
+        int fixedOffset = Kind == SourceKind.Window ? 3 : 2;
+        if (index == 0)
+        {
+            _audioKey = NoAudioKey;
+            return;
+        }
+        if (Kind == SourceKind.Window && index == 1)
+        {
+            _audioKey = CapturedWindowAudioKey;
+            return;
+        }
+        if (index == (Kind == SourceKind.Window ? 2 : 1))
+        {
+            _audioKey = DesktopAudioKey;
+            return;
+        }
+
+        int inputIndex = index - fixedOffset;
+        if (inputIndex >= 0 && inputIndex < _audioInputDevices.Count)
+        {
+            _audioKey = AudioInputDeviceKey(_audioInputDevices[inputIndex].Id);
+            return;
+        }
+
+        int processIndex = inputIndex - _audioInputDevices.Count;
+        _audioKey = processIndex >= 0 && processIndex < _windows.Count
+            ? _windows[processIndex].ProcessName
+            : CapturedWindowAudioKey;
     }
 
     internal void SelectWindowProcess(string? processName)
@@ -368,7 +437,13 @@ internal sealed class SourceSelectionModel
             return SourceSelectionApplyFailure.MonitorUnavailable;
         if (selection.Kind == SourceKind.CaptureDevice && captureDevice is null)
             return SourceSelectionApplyFailure.CaptureDeviceUnavailable;
-        if (selection.AudioKey is not (NoAudioKey or CapturedWindowAudioKey or DesktopAudioKey) &&
+        string? audioInputDeviceId = AudioInputDeviceIdFromKey(selection.AudioKey);
+        if (audioInputDeviceId is not null &&
+            !_audioInputDevices.Any(candidate =>
+                AudioInputDeviceIdentityEquals(candidate.Id, audioInputDeviceId)))
+            return SourceSelectionApplyFailure.AudioUnavailable;
+        if (audioInputDeviceId is null &&
+            selection.AudioKey is not (NoAudioKey or CapturedWindowAudioKey or DesktopAudioKey) &&
             !_windows.Any(candidate => AudioIdentityEquals(candidate.ProcessName, selection.AudioKey)))
             return SourceSelectionApplyFailure.AudioUnavailable;
 
@@ -405,9 +480,28 @@ internal sealed class SourceSelectionModel
     private void NormalizeAudioSelection()
     {
         if (_audioKey is NoAudioKey or CapturedWindowAudioKey or DesktopAudioKey) return;
+        string? audioInputDeviceId = AudioInputDeviceIdFromKey(_audioKey);
+        if (audioInputDeviceId is not null)
+        {
+            if (!_audioInputDevices.Any(device =>
+                AudioInputDeviceIdentityEquals(device.Id, audioInputDeviceId)))
+                _audioKey = CapturedWindowAudioKey;
+            return;
+        }
         if (!_windows.Any(window => AudioIdentityEquals(window.ProcessName, _audioKey)))
             _audioKey = CapturedWindowAudioKey;
     }
+
+    private static string AudioInputDeviceKey(string deviceId) =>
+        AudioInputDeviceKeyPrefix + deviceId;
+
+    private static bool IsAudioInputDeviceKey(string key) =>
+        key.StartsWith(AudioInputDeviceKeyPrefix, StringComparison.Ordinal);
+
+    private static string? AudioInputDeviceIdFromKey(string key) =>
+        IsAudioInputDeviceKey(key) && key.Length > AudioInputDeviceKeyPrefix.Length
+            ? key[AudioInputDeviceKeyPrefix.Length..]
+            : null;
 
     private static bool AudioIdentityEquals(string left, string right) =>
         left.Equals(right, StringComparison.OrdinalIgnoreCase);
@@ -417,6 +511,9 @@ internal sealed class SourceSelectionModel
 
     private static bool CaptureDeviceIdentityEquals(string left, string right) =>
         left.Equals(right, StringComparison.Ordinal);
+
+    private static bool AudioInputDeviceIdentityEquals(string left, string? right) =>
+        right is not null && left.Equals(right, StringComparison.OrdinalIgnoreCase);
 
     private static string Truncate(string value, int max) =>
         value.Length <= max ? value : value[..(max - 1)] + "…";
