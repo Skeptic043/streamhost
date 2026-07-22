@@ -12,6 +12,11 @@ internal enum GpuTextureCaptureStatus
 internal interface IGpuTextureCaptureSource
 {
     GpuTextureCaptureStatus TryGetGpuTexture(out GpuTextureCaptureFrame? frame);
+
+    bool TryCopyLatestGpuTexture(
+        GpuTextureCaptureFrame expectedFrame,
+        ID3D11Texture2D destination,
+        out long captureVersion);
 }
 
 internal interface IGpuWaitingFrameSource
@@ -25,22 +30,18 @@ internal interface IGpuWaitingFrameSource
 /// </summary>
 internal sealed class GpuTextureCaptureFrame
 {
-    private readonly Func<ID3D11Texture2D, bool> _copyLatest;
-
     internal GpuTextureCaptureFrame(
         ID3D11Device device,
         ID3D11DeviceContext context,
         int width,
         int height,
-        string adapterLuid,
-        Func<ID3D11Texture2D, bool> copyLatest)
+        string adapterLuid)
     {
         Device = device;
         Context = context;
         Width = width;
         Height = height;
         AdapterLuid = adapterLuid;
-        _copyLatest = copyLatest;
     }
 
     internal ID3D11Device Device { get; }
@@ -48,6 +49,4 @@ internal sealed class GpuTextureCaptureFrame
     internal int Width { get; }
     internal int Height { get; }
     internal string AdapterLuid { get; }
-
-    internal bool CopyLatest(ID3D11Texture2D destination) => _copyLatest(destination);
 }

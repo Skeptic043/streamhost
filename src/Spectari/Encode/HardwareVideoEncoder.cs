@@ -78,21 +78,12 @@ internal readonly record struct HardwareEncoderInitialization(
 
 internal readonly record struct EncodedAccessUnit(ReadOnlyMemory<byte> Data, bool IsKeyFrame);
 
-internal readonly record struct HardwareEncoderProgress(
-    int PendingQueueDepth,
-    int SubmittedQueueDepth,
-    int InputCredits,
-    long LastNeedInputEventTicks,
-    long LastHaveOutputEventTicks);
-
 /// <summary>
 /// Codec-aware encoder boundary. Native encoder API objects stay inside the implementation.
 /// Input textures cross as neutral leases and output is complete H.264 access units.
 /// </summary>
-internal interface IHardwareVideoEncoder : IDisposable
+internal interface IHardwareVideoEncoder : IHardwarePullEncoder, IDisposable
 {
-    long SubmittedFrameCount { get; }
-
     HardwareEncoderProbeResult Probe(
         HardwareEncoderProbeContext context,
         HardwareVideoEncoderParameters parameters);
@@ -101,17 +92,36 @@ internal interface IHardwareVideoEncoder : IDisposable
         HardwareEncoderInitialization initialization,
         HardwareVideoEncoderParameters parameters);
 
-    IReadOnlyList<EncodedAccessUnit> Encode(
-        VideoFrameLease frame,
-        long presentationTime100ns,
-        long duration100ns);
-
-    /// <summary>Pumps available encoder events, submits credited pending inputs,
-    /// and collects any output without waiting.</summary>
-    IReadOnlyList<EncodedAccessUnit> CollectOutput();
-    HardwareEncoderProgress GetProgressSnapshot();
-    IReadOnlyList<EncodedAccessUnit> Drain();
+    IReadOnlyList<EncodedAccessUnit> Shutdown();
     void Flush();
+}
+
+internal static class HardwareEncoderShutdownSequence
+{
+    internal static IReadOnlyList<EncodedAccessUnit> Execute(
+        Action endOfStream,
+        Func<IReadOnlyList<EncodedAccessUnit>> drain,
+        Action endStreaming,
+        Action shutdownObject,
+        Action release)
+    {
+        IReadOnlyList<EncodedAccessUnit> output = [];
+        try
+        {
+            endOfStream();
+            output = drain();
+        }
+        finally
+        {
+            try { endStreaming(); }
+            finally
+            {
+                try { shutdownObject(); }
+                finally { release(); }
+            }
+        }
+        return output;
+    }
 }
 
 /// <summary>Keeps the hardware lane dormant when no encoder implementation exists.</summary>
@@ -130,8 +140,8 @@ internal sealed class UnavailableHardwareVideoEncoder : IHardwareVideoEncoder
         HardwareVideoEncoderParameters parameters) =>
         throw new InvalidOperationException(UnavailableReason);
 
-    public IReadOnlyList<EncodedAccessUnit> Encode(
-        VideoFrameLease frame,
+    public bool TrySubmit(
+        IHardwareEncodeFrame frame,
         long presentationTime100ns,
         long duration100ns)
     {
@@ -139,9 +149,9 @@ internal sealed class UnavailableHardwareVideoEncoder : IHardwareVideoEncoder
         throw new InvalidOperationException(UnavailableReason);
     }
 
-    public IReadOnlyList<EncodedAccessUnit> CollectOutput() => [];
-    public HardwareEncoderProgress GetProgressSnapshot() => new(0, 0, 0, 0, 0);
-    public IReadOnlyList<EncodedAccessUnit> Drain() => [];
+    public IReadOnlyList<EncodedAccessUnit> Poll(long nowTicks) => [];
+    public HardwarePullEncoderProgress GetProgressSnapshot() => new(0, 0, 0, 0);
+    public IReadOnlyList<EncodedAccessUnit> Shutdown() => [];
     public void Flush() { }
     public void Dispose() { }
 }

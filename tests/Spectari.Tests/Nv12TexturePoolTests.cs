@@ -6,8 +6,13 @@ namespace Spectari.Tests;
 public sealed class Nv12TexturePoolTests
 {
     [Fact]
-    public void DefaultCapacityProvidesAsyncEncoderHeadroom()
+    public void DefaultCapacityLeavesHeadroomAboveTheMeasuredPeak()
     {
+        // The probe measured a peak occupancy of 2 against blank surfaces. It is
+        // the floor, not the number: an under-sized pool now costs unique frames
+        // silently rather than stalling loudly, so capacity must clear the
+        // measurement with room to spare.
+        const int measuredPeakOccupancy = 2;
         using var pool = Nv12TexturePool.CreateForTesting(Nv12TexturePool.DefaultCapacity);
         var leases = new List<VideoFrameLease>();
 
@@ -17,7 +22,8 @@ public sealed class Nv12TexturePoolTests
             leases.Add(lease!);
         }
 
-        Assert.Equal(12, pool.GetAccounting().Capacity);
+        Assert.True(pool.GetAccounting().Capacity > measuredPeakOccupancy + 1);
+        Assert.Equal(Nv12TexturePool.DefaultCapacity, pool.GetAccounting().Capacity);
         Assert.False(pool.TryRent(out _));
         foreach (VideoFrameLease lease in leases)
             lease.Return(FrameLeaseReturnReason.Flush);
@@ -40,7 +46,7 @@ public sealed class Nv12TexturePoolTests
         Assert.False(pool.TryRent(out VideoFrameLease? exhausted));
         Assert.Null(exhausted);
 
-        Assert.True(first!.Return(FrameLeaseReturnReason.OutputProduced));
+        Assert.True(first!.Return(FrameLeaseReturnReason.InputReleased));
         Assert.True(pool.TryRent(out VideoFrameLease? replacement));
         Assert.NotNull(replacement);
         second!.Return(FrameLeaseReturnReason.Flush);
@@ -53,7 +59,7 @@ public sealed class Nv12TexturePoolTests
         using var pool = Nv12TexturePool.CreateForTesting(2);
         FrameLeaseReturnReason[] reasons =
         [
-            FrameLeaseReturnReason.OutputProduced,
+            FrameLeaseReturnReason.InputReleased,
             FrameLeaseReturnReason.InputRejected,
             FrameLeaseReturnReason.Flush,
             FrameLeaseReturnReason.Failure,
@@ -85,7 +91,7 @@ public sealed class Nv12TexturePoolTests
 
         FrameLeaseAccounting accounting = pool.GetAccounting();
         Assert.Equal(2, accounting.Returns[FrameLeaseReturnReason.Teardown]);
-        Assert.False(first!.Return(FrameLeaseReturnReason.OutputProduced));
+        Assert.False(first!.Return(FrameLeaseReturnReason.InputReleased));
         Assert.False(second!.Return(FrameLeaseReturnReason.Failure));
     }
 
@@ -95,11 +101,11 @@ public sealed class Nv12TexturePoolTests
         using var pool = Nv12TexturePool.CreateForTesting(2);
         pool.TryRent(out VideoFrameLease? lease);
 
-        Assert.True(lease!.Return(FrameLeaseReturnReason.OutputProduced));
+        Assert.True(lease!.Return(FrameLeaseReturnReason.InputReleased));
         Assert.False(lease.Return(FrameLeaseReturnReason.Failure));
         Assert.Equal(
             1,
-            pool.GetAccounting().Returns[FrameLeaseReturnReason.OutputProduced]);
+            pool.GetAccounting().Returns[FrameLeaseReturnReason.InputReleased]);
         Assert.Equal(0, pool.GetAccounting().Returns[FrameLeaseReturnReason.Failure]);
     }
 }

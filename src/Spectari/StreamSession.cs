@@ -336,9 +336,8 @@ public sealed class StreamSession
         }
 
         // Independent output watchdog. It runs for the whole session because a
-        // capture, pacing, ffmpeg-input, or encoder/output stage can stop later.
-        // Frames are fed at a fixed rate regardless of screen activity, so a
-        // zero-fragment window proves a stall but not which stage caused it.
+        // capture, ffmpeg-input, or encoder/output stage can stop later. Its
+        // progress snapshot preserves the upstream versus output-path split.
         FrameWriter? frameWriter = videoPlan.Lane == VideoInputLane.RawVideo
             ? new FrameWriter(ffmpeg, capture.Width * capture.Height * 4)
             : null;
@@ -394,7 +393,6 @@ public sealed class StreamSession
                     stage => _pacingStage = stage),
                 hardwareLaneFactory: () => new HardwareVideoPacingLane(
                     capture,
-                    (IGpuTextureCaptureSource)capture,
                     hardwareConverter!,
                     hardwareEncoder,
                     accessUnitWriter!,

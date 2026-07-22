@@ -100,8 +100,7 @@ internal sealed class WasapiEndpointAudioCapture : IDisposable
             _deliveredFrames = _leadInFrames;
         }
 
-        long leadInMs = (_leadInFrames * 1000 + SampleRate / 2) / SampleRate;
-        Console.WriteLine($"[audio] aligned to video timeline (+{leadInMs} ms lead-in silence)");
+        Console.WriteLine(ProcessAudioCapture.FormatLeadInLog(_leadInFrames));
 
         _writerThread = new Thread(WriteLoop)
         {

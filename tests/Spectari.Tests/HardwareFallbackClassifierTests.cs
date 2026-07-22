@@ -20,7 +20,7 @@ public sealed class HardwareFallbackClassifierTests
     }
 
     [Theory]
-    [InlineData((int)HardwareFallbackKind.SustainedFrameDebt)]
+    [InlineData((int)HardwareFallbackKind.EncoderCreditFamine)]
     [InlineData((int)HardwareFallbackKind.RuntimeFailure)]
     public void RuntimeFailuresProduceSessionStallReason(int kindValue)
     {

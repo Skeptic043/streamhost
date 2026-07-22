@@ -46,13 +46,16 @@ public sealed class AudioPipelineTests
     }
 
     [Fact]
-    public void LeadInFramesMatchOneSecondBetweenEpochAndFallback()
+    public void LeadInFramesIncludeOneHundredMillisecondSafetyBias()
     {
         const long videoEpochTicks = 1234;
         long fallbackStartTicks = videoEpochTicks + Stopwatch.Frequency;
 
         long frames = ProcessAudioCapture.GetLeadInFrames(videoEpochTicks, fallbackStartTicks);
 
-        Assert.Equal(ProcessAudioCapture.SampleRate, frames);
+        Assert.Equal(ProcessAudioCapture.SampleRate * 11 / 10, frames);
+        Assert.Equal(
+            "[audio] aligned to video timeline (+1100 ms lead-in silence, includes 100 ms safety bias)",
+            ProcessAudioCapture.FormatLeadInLog(frames));
     }
 }

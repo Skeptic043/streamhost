@@ -49,51 +49,17 @@ public sealed class FfmpegEncoder : IDisposable
         LogBuildInfoOnce(); // first stream start records the exact bundled ffmpeg to the log
         CopiesH264Video = videoInput == FfmpegVideoInput.H264AnnexB;
         EncoderName = CopiesH264Video ? "Media Foundation H.264" : encoder;
-        int gop = Math.Max(fps / 2, 1);              // keyframe every 0.5 s => fast late-join/resync
-        long fragUs = fragMs > 0 ? fragMs * 1000L    // batched fragments (fewer, larger MSE appends)
-                                 : 1_000_000L / fps; // default: one fragment per frame
-
-        string encoderOpts = EncoderOpts(encoder);
-
-        string scale = (outWidth != inWidth || outHeight != inHeight)
-            ? $"-vf scale={outWidth}:{outHeight}:flags=bilinear "
-            : "";
-
-        string audioIn = audioPipeName is not null
-            ? $"-thread_queue_size 512 -f f32le -ar {Audio.ProcessAudioCapture.SampleRate} -ac {Audio.ProcessAudioCapture.Channels} -i \\\\.\\pipe\\{audioPipeName} "
-            : "";
-        string audioOut = audioPipeName is not null
-            ? "-map 0:v -map 1:a -c:a aac -b:a 160k "
-            : "-an ";
-
-        // -max_interleave_delta: the muxer's default is to hold finished video
-        // packets up to 10 SECONDS waiting for the other stream's timestamps to
-        // catch up. A stalled audio feed therefore froze the entire fragment
-        // output (indistinguishable from an encoder stall). Half a second keeps
-        // interleaving tight in the healthy case and force-flushes video-only
-        // fragments when audio starves - a degraded stream instead of no stream.
-        string args = videoInput == FfmpegVideoInput.H264AnnexB
-            ? $"-hide_banner -loglevel warning " +
-              // The timestamp filter must run at DEMUX (input side): ffmpeg's
-              // interleaver orders packets before output bitstream filters run,
-              // and untimestamped video makes it hold every audio packet until
-              // EOF, so viewers receive a video-only stream that never plays.
-              $"-thread_queue_size 128 {H264CfrTimestampOptions(fps)} -f h264 -framerate {fps} -i pipe:0 " +
-              audioIn +
-              $"{audioOut}-c:v copy " +
-              $"-f mp4 -movflags +empty_moov+default_base_moof -frag_duration {fragUs} " +
-              $"-max_interleave_delta 500000 " +
-              $"-flush_packets 1 pipe:1"
-            : $"-hide_banner -loglevel warning " +
-              $"-thread_queue_size 128 -f rawvideo -pixel_format bgra -video_size {inWidth}x{inHeight} -framerate {fps} -i pipe:0 " +
-              audioIn +
-              scale +
-              $"{audioOut}-c:v {encoder} {encoderOpts} " +
-              $"-b:v {bitrateKbps}k -maxrate {bitrateKbps * 5 / 4}k -bufsize {bitrateKbps / 2}k " +
-              $"-g {gop} -bf 0 -pix_fmt yuv420p " +
-              $"-f mp4 -movflags +empty_moov+default_base_moof -frag_duration {fragUs} " +
-              $"-max_interleave_delta 500000 " +
-              $"-flush_packets 1 pipe:1";
+        string args = BuildArguments(
+            inWidth,
+            inHeight,
+            fps,
+            bitrateKbps,
+            outWidth,
+            outHeight,
+            encoder,
+            audioPipeName,
+            fragMs,
+            videoInput);
 
         _process = new Process
         {
@@ -121,6 +87,61 @@ public sealed class FfmpegEncoder : IDisposable
         _stdin = _process.StandardInput.BaseStream;
     }
 
+    internal static string BuildArguments(
+        int inWidth,
+        int inHeight,
+        int fps,
+        int bitrateKbps,
+        int outWidth,
+        int outHeight,
+        string encoder,
+        string? audioPipeName,
+        int fragMs,
+        FfmpegVideoInput videoInput)
+    {
+        int gop = Math.Max(fps / 2, 1);              // keyframe every 0.5 s => fast late-join/resync
+        long fragUs = fragMs > 0 ? fragMs * 1000L    // batched fragments (fewer, larger MSE appends)
+                                 : 1_000_000L / fps; // default: one fragment per frame
+
+        string encoderOpts = EncoderOpts(encoder);
+
+        string scale = (outWidth != inWidth || outHeight != inHeight)
+            ? $"-vf scale={outWidth}:{outHeight}:flags=bilinear "
+            : "";
+
+        string audioIn = audioPipeName is not null
+            ? $"-thread_queue_size 512 -f f32le -ar {Audio.ProcessAudioCapture.SampleRate} -ac {Audio.ProcessAudioCapture.Channels} -i \\\\.\\pipe\\{audioPipeName} "
+            : "";
+        string audioOut = audioPipeName is not null
+            ? "-map 0:v -map 1:a -c:a aac -b:a 160k "
+            : "-an ";
+
+        // -max_interleave_delta: the muxer's default is to hold finished video
+        // packets up to 10 SECONDS waiting for the other stream's timestamps to
+        // catch up. A stalled audio feed therefore froze the entire fragment
+        // output (indistinguishable from an encoder stall). Half a second keeps
+        // interleaving tight in the healthy case and force-flushes video-only
+        // fragments when audio starves - a degraded stream instead of no stream.
+        return videoInput == FfmpegVideoInput.H264AnnexB
+            ? $"-hide_banner -loglevel warning " +
+              $"-thread_queue_size 128 -use_wallclock_as_timestamps 1 -f h264 -i pipe:0 " +
+              audioIn +
+              $"{audioOut}-c:v copy " +
+              $"-f mp4 -movflags +empty_moov+default_base_moof -frag_duration {fragUs} " +
+              $"-max_interleave_delta 500000 " +
+              $"-flush_packets 1 pipe:1"
+            : $"-hide_banner -loglevel warning " +
+              $"-thread_queue_size 128 -f rawvideo -pixel_format bgra -video_size {inWidth}x{inHeight} -framerate {fps} -i pipe:0 " +
+              audioIn +
+              scale +
+              $"{audioOut}-c:v {encoder} {encoderOpts} " +
+              $"-b:v {bitrateKbps}k -maxrate {bitrateKbps * 5 / 4}k -bufsize {bitrateKbps / 2}k " +
+              $"-g {gop} -bf 0 -pix_fmt yuv420p " +
+              $"-f mp4 -movflags +empty_moov+default_base_moof -frag_duration {fragUs} " +
+              $"-max_interleave_delta 500000 " +
+              $"-flush_packets 1 pipe:1";
+    }
+
     /// <summary>Per-encoder options, shared by the real encode AND the startup probe
     /// so a probe pass is meaningful for the config that actually runs (the v0.9-v0.10
     /// AMD miss: the probe passed on default options while the live encode stalled on
@@ -136,15 +157,6 @@ public sealed class FfmpegEncoder : IDisposable
         "h264_qsv"   => "-preset veryfast -profile:v high",
         _            => "-preset veryfast -tune zerolatency -profile:v high",
     };
-
-    internal static string H264CfrTimestampOptions(int framesPerSecond)
-    {
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(framesPerSecond);
-        // setts evaluates expressions in the INPUT timebase and rescales after,
-        // so a bare frame index floors to zero; divide by fps and the input
-        // timebase (TB) to land each packet exactly one frame apart.
-        return $"-bsf:v setts=pts=N/{framesPerSecond}/TB:dts=N/{framesPerSecond}/TB:duration=1/{framesPerSecond}/TB";
-    }
 
     public bool HasExited
     {

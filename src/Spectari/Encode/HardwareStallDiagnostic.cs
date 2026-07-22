@@ -7,38 +7,19 @@ internal static class HardwareStallDiagnostic
     internal static string FormatDelivery(
         double framesPerSecond,
         long accessUnits,
-        int debtFrames,
-        HardwareEncoderProgress encoder,
-        long inputCreditsGranted) =>
-        $"[gpu-encode] encode delivery: {framesPerSecond:F1} fps, {accessUnits} access units, debt {debtFrames} frames, pending-depth={encoder.PendingQueueDepth}, submitted-depth={encoder.SubmittedQueueDepth}, input-credits={encoder.InputCredits}, input-credits-granted={inputCreditsGranted}.";
-
-    internal static long CountInputCreditsGranted(
-        long previousSubmittedFrames,
-        int previousInputCredits,
-        long submittedFrames,
-        int inputCredits)
-    {
-        ArgumentOutOfRangeException.ThrowIfNegative(previousSubmittedFrames);
-        ArgumentOutOfRangeException.ThrowIfNegative(previousInputCredits);
-        ArgumentOutOfRangeException.ThrowIfNegative(submittedFrames);
-        ArgumentOutOfRangeException.ThrowIfNegative(inputCredits);
-        if (submittedFrames < previousSubmittedFrames)
-            throw new ArgumentException("Submitted frame count must be monotonic.", nameof(submittedFrames));
-
-        return checked(
-            submittedFrames - previousSubmittedFrames + inputCredits - previousInputCredits);
-    }
+        HardwarePullEncoderProgress encoder) =>
+        $"[gpu-encode] encode delivery: {framesPerSecond:F1} unique fps, {accessUnits} access units, in-flight={encoder.InFlightDepth}, input-credits={encoder.InputCredits}.";
 
     internal static string Format(
         FrameLeaseAccounting pool,
-        HardwareEncoderProgress encoder,
+        HardwarePullEncoderProgress encoder,
         VideoInputWriterProgress writer,
         long nowTicks) =>
         Format(pool, encoder, writer, nowTicks, Stopwatch.Frequency);
 
     internal static string Format(
         FrameLeaseAccounting pool,
-        HardwareEncoderProgress encoder,
+        HardwarePullEncoderProgress encoder,
         VideoInputWriterProgress writer,
         long nowTicks,
         long timestampFrequency)
@@ -50,9 +31,9 @@ internal static class HardwareStallDiagnostic
             ? writer.LastWriteStartedTicks
             : writer.LastWriteCompletedTicks;
         return string.Join(Environment.NewLine,
-            "[gpu-encode] sustained-debt resources:",
+            "[gpu-encode] encoder-stall resources:",
             $"  nv12-pool outstanding={pool.Outstanding}/{pool.Capacity}",
-            $"  mf-encoder pending-depth={encoder.PendingQueueDepth} submitted-depth={encoder.SubmittedQueueDepth} input-credits={encoder.InputCredits} last-need-input={Age(encoder.LastNeedInputEventTicks, nowTicks, timestampFrequency)} last-have-output={Age(encoder.LastHaveOutputEventTicks, nowTicks, timestampFrequency)}",
+            $"  mf-encoder in-flight={encoder.InFlightDepth} input-credits={encoder.InputCredits} last-need-input={Age(encoder.LastNeedInputEventTicks, nowTicks, timestampFrequency)} last-have-output={Age(encoder.LastHaveOutputEventTicks, nowTicks, timestampFrequency)}",
             $"  video-input queue-depth={writer.QueueDepth} write-in-progress={writer.WriteInProgress.ToString().ToLowerInvariant()} last-write={Age(lastWriteTicks, nowTicks, timestampFrequency)}");
     }
 

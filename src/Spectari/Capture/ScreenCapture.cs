@@ -320,8 +320,7 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics, IGpuTex
             _context,
             Width,
             Height,
-            AdapterLuid,
-            TryCopyLatestTexture);
+            AdapterLuid);
 
         // Staging textures are CPU-readback only and can't carry a bind flag.
         desc.Usage = ResourceUsage.Staging;
@@ -454,9 +453,9 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics, IGpuTex
                     frame?.Dispose();
                     frame = null;
                 }
+                _hasFrame = true;
+                Interlocked.Increment(ref _framesArrived);
             }
-            _hasFrame = true;
-            Interlocked.Increment(ref _framesArrived);
             long frameReadyTicks = Stopwatch.GetTimestamp();
             Interlocked.Exchange(ref _lastFrameReadyTicks, frameReadyTicks);
             if (_windowDeliveryRate?.RecordFrame(
@@ -758,10 +757,22 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics, IGpuTex
         return GpuTextureCaptureStatus.Available;
     }
 
-    private bool TryCopyLatestTexture(ID3D11Texture2D destination)
+    bool IGpuTextureCaptureSource.TryCopyLatestGpuTexture(
+        GpuTextureCaptureFrame expectedFrame,
+        ID3D11Texture2D destination,
+        out long captureVersion)
     {
         if (!_hasFrame || _disposing)
+        {
+            captureVersion = 0;
             return false;
+        }
+
+        if (!ReferenceEquals(expectedFrame, _gpuTextureFrame))
+        {
+            captureVersion = 0;
+            return false;
+        }
 
         Texture2DDescription description = destination.Description;
         if (description.Width != (uint)Width || description.Height != (uint)Height ||
@@ -775,8 +786,12 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics, IGpuTex
         lock (_gate)
         {
             if (_disposing || !_hasFrame)
+            {
+                captureVersion = 0;
                 return false;
+            }
             _context.CopyResource(destination, _latest);
+            captureVersion = FrameVersion;
             return true;
         }
     }

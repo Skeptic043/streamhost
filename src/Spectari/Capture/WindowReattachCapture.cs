@@ -3,6 +3,7 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.Runtime.InteropServices;
+using Vortice.Direct3D11;
 
 namespace Spectari.Capture;
 
@@ -223,6 +224,33 @@ internal sealed class WindowReattachCapture : ICaptureSource, ICaptureDiagnostic
         }
 
         return ((IGpuTextureCaptureSource)active).TryGetGpuTexture(out frame);
+    }
+
+    bool IGpuTextureCaptureSource.TryCopyLatestGpuTexture(
+        GpuTextureCaptureFrame expectedFrame,
+        ID3D11Texture2D destination,
+        out long captureVersion)
+    {
+        lock (_gate)
+        {
+            if (_waiting || _active is null)
+            {
+                captureVersion = 0;
+                return false;
+            }
+
+            if (!((IGpuTextureCaptureSource)_active).TryCopyLatestGpuTexture(
+                    expectedFrame,
+                    destination,
+                    out long activeVersion))
+            {
+                captureVersion = 0;
+                return false;
+            }
+
+            captureVersion = _activeVersionBase + activeVersion;
+            return true;
+        }
     }
 
     bool IGpuWaitingFrameSource.TryGetWaitingFrame(out ReadOnlyMemory<byte> bgraFrame)

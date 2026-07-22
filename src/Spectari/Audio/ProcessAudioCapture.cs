@@ -46,6 +46,7 @@ public sealed class ProcessAudioCapture : IDisposable
 
     private static readonly byte[] SilenceBlock = new byte[SampleRate * BytesPerFrame / 100]; // 10 ms
     private const int MaxInitialLeadInSeconds = 5;
+    internal const int LeadInBiasMilliseconds = 100;
     // Field-tunable ceiling on how much silence we will inject to resync after a
     // stall (~2 s). Beyond it the excess dropped duration is accepted as a bounded
     // residual rather than dumping a huge run of silence to catch up.
@@ -117,8 +118,7 @@ public sealed class ProcessAudioCapture : IDisposable
                 _queue.Add((new byte[leadInBytes], leadInBytes));
                 _deliveredFrames += leadInFrames;
             }
-            long leadInMs = (leadInFrames * 1000 + SampleRate / 2) / SampleRate;
-            Console.WriteLine($"[audio] aligned to video timeline (+{leadInMs} ms lead-in silence)");
+            Console.WriteLine(FormatLeadInLog(leadInFrames));
         }
         catch
         {
@@ -143,10 +143,22 @@ public sealed class ProcessAudioCapture : IDisposable
 
     internal static long GetLeadInFrames(long videoEpochTicks, long captureStartTicks)
     {
-        // A corrupt or extremely late epoch cannot inject more than five seconds.
-        long elapsedTicks = Math.Clamp(captureStartTicks - videoEpochTicks,
-            0, Stopwatch.Frequency * MaxInitialLeadInSeconds);
-        return (elapsedTicks * SampleRate + Stopwatch.Frequency / 2) / Stopwatch.Frequency;
+        long maximumTicks = Stopwatch.Frequency * MaxInitialLeadInSeconds;
+        long biasTicks = Stopwatch.Frequency * LeadInBiasMilliseconds / 1000;
+        long elapsedTicks = Math.Clamp(
+            captureStartTicks - videoEpochTicks,
+            0,
+            maximumTicks);
+        long biasedTicks = Math.Min(maximumTicks, elapsedTicks + biasTicks);
+        return (biasedTicks * SampleRate + Stopwatch.Frequency / 2) /
+            Stopwatch.Frequency;
+    }
+
+    internal static string FormatLeadInLog(long leadInFrames)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(leadInFrames);
+        long leadInMs = (leadInFrames * 1000 + SampleRate / 2) / SampleRate;
+        return $"[audio] aligned to video timeline (+{leadInMs} ms lead-in silence, includes {LeadInBiasMilliseconds} ms safety bias)";
     }
 
     private void CaptureLoop()

@@ -166,14 +166,10 @@ internal interface IEncodedAccessUnitSink
     void Write(IReadOnlyList<EncodedAccessUnit> accessUnits);
 }
 
-/// <summary>
-/// Owns texture-lane fixed-rate submission, debt repayment, and the first-submission
-/// epoch while encoder and output implementations stay swappable.
-/// </summary>
+/// <summary>Runs the GPU lane on one encoder worker and owns ordered shutdown.</summary>
 internal sealed class HardwareVideoPacingLane : IVideoPacingLane
 {
     private readonly ICaptureSource _capture;
-    private readonly IGpuTextureCaptureSource _gpuCapture;
     private readonly Nv12FrameConverter _converter;
     private readonly IHardwareVideoEncoder _encoder;
     private readonly IEncodedAccessUnitSink _output;
@@ -182,7 +178,6 @@ internal sealed class HardwareVideoPacingLane : IVideoPacingLane
     private readonly Broadcaster _broadcaster;
     private readonly Task _splitterTask;
     private readonly Task _serverTask;
-    private readonly HardwareFrameTickPolicy _ticks;
     private readonly int _framesPerSecond;
     private readonly TaskCompletionSource<long> _videoEpoch;
     private readonly Action<string> _setStage;
@@ -190,7 +185,6 @@ internal sealed class HardwareVideoPacingLane : IVideoPacingLane
 
     internal HardwareVideoPacingLane(
         ICaptureSource capture,
-        IGpuTextureCaptureSource gpuCapture,
         Nv12FrameConverter converter,
         IHardwareVideoEncoder encoder,
         IEncodedAccessUnitSink output,
@@ -205,7 +199,6 @@ internal sealed class HardwareVideoPacingLane : IVideoPacingLane
         Action<string> runtimeFailure)
     {
         _capture = capture;
-        _gpuCapture = gpuCapture;
         _converter = converter;
         _encoder = encoder;
         _output = output;
@@ -214,7 +207,6 @@ internal sealed class HardwareVideoPacingLane : IVideoPacingLane
         _broadcaster = broadcaster;
         _splitterTask = splitterTask;
         _serverTask = serverTask;
-        _ticks = new HardwareFrameTickPolicy(framesPerSecond);
         _framesPerSecond = framesPerSecond;
         _videoEpoch = videoEpoch;
         _setStage = setStage;
@@ -223,21 +215,109 @@ internal sealed class HardwareVideoPacingLane : IVideoPacingLane
 
     public string Run(CancellationToken cancellationToken)
     {
-        using var timer = new HighResTimer();
-        long pacingTicks = Math.Max(1, Stopwatch.Frequency / _framesPerSecond);
-        long frameDuration100ns = Math.Max(1, TimeSpan.TicksPerSecond / _framesPerSecond);
-        long next = Stopwatch.GetTimestamp() + pacingTicks;
-        long submittedFrames = 0;
-        long encodedUnits = 0;
-        long freshFrames = 0;
-        long duplicateFrames = 0;
-        long lastVersion = _capture.FrameVersion;
-        long lastCaptureFrames = _capture.FramesArrived;
+        var capture = new CaptureHardwareEncodeAdapter(_capture);
+        var converter = new Nv12HardwareEncodeConverter(_converter, _capture);
+        var pullLoop = new HardwareEncoderPullLoop(
+            capture,
+            converter,
+            _encoder,
+            _output,
+            _framesPerSecond,
+            Stopwatch.Frequency,
+            ticks => _videoEpoch.TrySetResult(ticks));
+        using var workerStop = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken);
+        using var workerWake = new AutoResetEvent(false);
+        using var workerCompleted = new ManualResetEventSlim(false);
+        HardwarePullRunResult workerResult = default;
+        Exception? workerError = null;
+
+        var worker = new Thread(() =>
+        {
+            try
+            {
+                workerResult = RunWorker(
+                    pullLoop,
+                    capture,
+                    workerStop.Token,
+                    workerWake);
+            }
+            catch (Exception ex)
+            {
+                workerError = ex;
+            }
+            finally
+            {
+                workerCompleted.Set();
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "mf-encoder-pull",
+            Priority = ThreadPriority.AboveNormal,
+        };
+
+        worker.Start();
+        try
+        {
+            while (!workerCompleted.Wait(25))
+            {
+                if (!cancellationToken.IsCancellationRequested) continue;
+                workerStop.Cancel();
+                workerWake.Set();
+            }
+        }
+        finally
+        {
+            workerStop.Cancel();
+            workerWake.Set();
+        }
+
+        if (!worker.Join(TimeSpan.FromSeconds(2)))
+        {
+            return RuntimeFailure(
+                "encoder worker did not stop within 2 seconds");
+        }
+
+        if (workerError is not null)
+        {
+            try { ShutdownHardware(); }
+            catch { }
+            throw workerError;
+        }
+
+        string result = workerResult.Reason;
+        if (result != "stopped")
+        {
+            long now = Stopwatch.GetTimestamp();
+            Console.Error.WriteLine(HardwareStallDiagnostic.Format(
+                converter.PoolAccounting,
+                _encoder.GetProgressSnapshot(),
+                _writer.GetProgressSnapshot(),
+                now));
+            HardwareFallbackKind kind = result.Contains(
+                "no NeedInput event",
+                StringComparison.Ordinal)
+                    ? HardwareFallbackKind.EncoderCreditFamine
+                    : HardwareFallbackKind.RuntimeFailure;
+            result = RuntimeFailure(result, kind);
+        }
+
+        ShutdownHardware();
+        return result;
+    }
+
+    private HardwarePullRunResult RunWorker(
+        HardwareEncoderPullLoop pullLoop,
+        IHardwareEncodeCapture capture,
+        CancellationToken cancellationToken,
+        AutoResetEvent wake)
+    {
         long lastReport = Stopwatch.GetTimestamp();
         long reportInterval = Stopwatch.Frequency * 2;
-        long lastDebtLog = 0;
-        long lastReportSubmittedFrames = _encoder.SubmittedFrameCount;
-        int lastReportInputCredits = _encoder.GetProgressSnapshot().InputCredits;
+        long lastCaptureFrames = capture.FramesArrived;
+        long lastSubmittedFrames = pullLoop.SubmittedFrames;
+        long lastAccessUnits = pullLoop.AccessUnitsWritten;
 
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -245,168 +325,81 @@ internal sealed class HardwareVideoPacingLane : IVideoPacingLane
             {
                 WaitingForWindow: true,
             };
-            _setStage("waiting-for-sample-time");
-            timer.WaitUntil(next);
-            next += pacingTicks;
-
             _setStage("supervising-pipeline");
             string? failure = SupervisePipeline();
-            if (failure is not null) return RuntimeFailure(failure);
-
-            long currentVersion = _capture.FrameVersion;
-            bool fresh = currentVersion != lastVersion;
-            lastVersion = currentVersion;
-
-            HardwareEncoderProgress encoderProgress = _encoder.GetProgressSnapshot();
-            HardwareFrameTickAdmission admission = _ticks.AdmitEncoderTick(
-                encoderProgress.PendingQueueDepth);
-            if (!admission.Accepted)
+            if (failure is not null)
             {
-                string? backpressureFailure = CollectAfterUnavailableTick(
-                    admission.Debt,
-                    $"pending queue cap {HardwareFrameTickPolicy.MaximumPendingQueueDepth} reached",
-                    ref encodedUnits,
-                    ref lastDebtLog);
-                if (backpressureFailure is not null) return backpressureFailure;
-                continue;
+                return new HardwarePullRunResult(
+                    failure,
+                    pullLoop.SubmittedFrames,
+                    pullLoop.AccessUnitsWritten);
             }
 
-            _setStage("gpu-scale-convert");
-            if (!_converter.TryConvert(_gpuCapture, out VideoFrameLease? current, out Nv12ConvertFailure convertFailure))
-            {
-                FrameDebtSnapshot debt = _ticks.RecordUnavailableTick();
-                string? convertFailureResult = CollectAfterUnavailableTick(
-                    debt,
-                    convertFailure.ToString(),
-                    ref encodedUnits,
-                    ref lastDebtLog);
-                if (convertFailureResult is not null) return convertFailureResult;
-                continue;
-            }
-
-            VideoFrameLease? duplicate = null;
-            bool repay = admission.CanRepayDebt &&
-                _ticks.CurrentDebt.DebtFrames > 0 &&
-                _converter.TryDuplicate(current!, out duplicate);
-            HardwareFrameTickPlan plan = _ticks.PlanAvailableTick(repay);
-            VideoFrameLease[] submissions = plan.DuplicateSubmissions == 1
-                ? [current!, duplicate!]
-                : [current!];
-            if (fresh) freshFrames++;
-            else duplicateFrames++;
-            duplicateFrames += plan.DuplicateSubmissions;
-
-            for (int submissionIndex = 0; submissionIndex < submissions.Length; submissionIndex++)
-            {
-                VideoFrameLease frame = submissions[submissionIndex];
-                try
-                {
-                    _setStage("hardware-encode");
-                    long submissionsBefore = _encoder.SubmittedFrameCount;
-                    IReadOnlyList<EncodedAccessUnit> output = _encoder.Encode(
-                        frame,
-                        submittedFrames * frameDuration100ns,
-                        frameDuration100ns);
-                    long submissionsAfter = _encoder.SubmittedFrameCount;
-                    if (_ticks.ConfirmNormalTickSubmission(submissionsBefore, submissionsAfter))
-                        _videoEpoch.TrySetResult(Stopwatch.GetTimestamp());
-                    submittedFrames++;
-                    encodedUnits += output.Count;
-                    if (output.Count > 0)
-                    {
-                        _setStage("access-unit-output");
-                        _output.Write(output);
-                    }
-                }
-                catch
-                {
-                    for (int pendingIndex = submissionIndex + 1;
-                        pendingIndex < submissions.Length;
-                        pendingIndex++)
-                    {
-                        submissions[pendingIndex].Return(FrameLeaseReturnReason.Failure);
-                    }
-                    throw;
-                }
-            }
-            _setStage("sample-complete");
-
+            _setStage("hardware-event-poll");
             long now = Stopwatch.GetTimestamp();
-            if (now > next + 5 * pacingTicks)
-                next = now + pacingTicks;
+            HardwarePullStepResult step = pullLoop.Step(now);
+            _setStage("sample-complete");
+            if (step.StallReason is not null)
+            {
+                return new HardwarePullRunResult(
+                    step.StallReason,
+                    pullLoop.SubmittedFrames,
+                    pullLoop.AccessUnitsWritten);
+            }
 
             if (now - lastReport > reportInterval)
             {
                 double seconds = (now - lastReport) / (double)Stopwatch.Frequency;
-                double encodeFps = (freshFrames + duplicateFrames) / seconds;
-                long totalFrames = freshFrames + duplicateFrames;
-                double duplicatePercent = totalFrames == 0
-                    ? 0
-                    : duplicateFrames * 100.0 / totalFrames;
+                long submitted = pullLoop.SubmittedFrames - lastSubmittedFrames;
+                long accessUnits = pullLoop.AccessUnitsWritten - lastAccessUnits;
                 _broadcaster.SourceFps = (int)Math.Round(
-                    (_capture.FramesArrived - lastCaptureFrames) / seconds);
-                _broadcaster.DupPercent = (int)Math.Round(duplicatePercent);
-                HardwareEncoderProgress reportProgress = _encoder.GetProgressSnapshot();
-                long reportSubmittedFrames = _encoder.SubmittedFrameCount;
-                long inputCreditsGranted = HardwareStallDiagnostic.CountInputCreditsGranted(
-                    lastReportSubmittedFrames,
-                    lastReportInputCredits,
-                    reportSubmittedFrames,
-                    reportProgress.InputCredits);
+                    (capture.FramesArrived - lastCaptureFrames) / seconds);
+                _broadcaster.DupPercent = 0;
                 Console.WriteLine(HardwareStallDiagnostic.FormatDelivery(
-                    encodeFps,
-                    encodedUnits,
-                    plan.Debt.DebtFrames,
-                    reportProgress,
-                    inputCreditsGranted));
-                lastCaptureFrames = _capture.FramesArrived;
-                freshFrames = duplicateFrames = encodedUnits = 0;
+                    submitted / seconds,
+                    accessUnits,
+                    _encoder.GetProgressSnapshot()));
+                lastCaptureFrames = capture.FramesArrived;
+                lastSubmittedFrames = pullLoop.SubmittedFrames;
+                lastAccessUnits = pullLoop.AccessUnitsWritten;
                 lastReport = now;
-                lastReportSubmittedFrames = reportSubmittedFrames;
-                lastReportInputCredits = reportProgress.InputCredits;
                 reportInterval = Stopwatch.Frequency * 10;
             }
+
+            if (step.DidWork) continue;
+            _setStage("waiting-for-capture");
+            if (!capture.WaitForFreshFrame(pullLoop.LastSubmittedVersion, 1))
+                WaitHandle.WaitAny([cancellationToken.WaitHandle, wake], 1);
         }
 
-        _setStage("hardware-drain");
-        IReadOnlyList<EncodedAccessUnit> drained = _encoder.Drain();
-        if (drained.Count > 0)
-            _output.Write(drained);
-        return "stopped";
+        return new HardwarePullRunResult(
+            "stopped",
+            pullLoop.SubmittedFrames,
+            pullLoop.AccessUnitsWritten);
     }
 
-    private string? CollectAfterUnavailableTick(
-        FrameDebtSnapshot debt,
-        string reason,
-        ref long encodedUnits,
-        ref long lastDebtLog)
+    private void ShutdownHardware()
     {
-        _setStage("hardware-output-collect");
-        IReadOnlyList<EncodedAccessUnit> collected = _encoder.CollectOutput();
-        encodedUnits += collected.Count;
-        if (collected.Count > 0)
+        try
         {
-            _setStage("access-unit-output");
-            _output.Write(collected);
+            _setStage("hardware-drain");
+            IReadOnlyList<EncodedAccessUnit> drained = _encoder.Shutdown();
+            if (drained.Count > 0)
+                _output.Write(drained);
         }
-
-        long debtNow = Stopwatch.GetTimestamp();
-        if (debtNow - lastDebtLog >= Stopwatch.Frequency || debt.StallSignal)
+        finally
         {
-            Console.Error.WriteLine(
-                $"[gpu-encode] frame debt: {debt.DebtFrames} frames, sync error {debt.SyncError.TotalMilliseconds:F1} ms, recent net growth {debt.RecentNetGrowthFrames} frames/{FrameDebtPolicy.GrowthWindowSeconds}s ({reason}).");
-            lastDebtLog = debtNow;
+            try
+            {
+                _setStage("hardware-release");
+                _encoder.Dispose();
+            }
+            finally
+            {
+                _setStage("hardware-pool-dispose");
+                _converter.Dispose();
+            }
         }
-        if (!debt.StallSignal) return null;
-
-        Console.Error.WriteLine(HardwareStallDiagnostic.Format(
-            _converter.PoolAccounting,
-            _encoder.GetProgressSnapshot(),
-            _writer.GetProgressSnapshot(),
-            debtNow));
-        return RuntimeFailure(
-            $"frame debt grew by {debt.RecentNetGrowthFrames} frames in {FrameDebtPolicy.GrowthWindowSeconds} seconds, reaching {debt.DebtFrames} frames after {reason}",
-            HardwareFallbackKind.SustainedFrameDebt);
     }
 
     private string? SupervisePipeline()

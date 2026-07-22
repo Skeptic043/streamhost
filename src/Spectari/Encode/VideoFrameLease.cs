@@ -10,7 +10,7 @@ internal enum VideoPixelFormat
 
 internal enum FrameLeaseReturnReason
 {
-    OutputProduced,
+    InputReleased,
     InputRejected,
     Flush,
     Failure,
@@ -33,7 +33,7 @@ internal readonly record struct FrameLeaseAccounting(
 
 /// <summary>
 /// A non-blocking lease for one encode-sized NV12 texture. The encoder returns it
-/// with the reason that ended ownership, including delayed output and teardown.
+/// only after the input sample reference is released or the transform is shut down.
 /// </summary>
 internal sealed class VideoFrameLease
 {
@@ -66,7 +66,14 @@ internal sealed class VideoFrameLease
 /// <summary>Fixed encode-surface pool with immediate failure on exhaustion.</summary>
 internal sealed class Nv12TexturePool : IDisposable
 {
-    internal const int DefaultCapacity = 12;
+    // A synthetic probe against this NVIDIA MFT measured a peak occupancy of 2
+    // and a maximum input hold of one later submission. That probe fed blank
+    // surfaces, not real 1440p content under load, so it sets the floor rather
+    // than the number. Exhaustion is no longer fatal (the pull loop simply does
+    // not submit that frame) but it is also no longer loud, so an under-sized
+    // pool would cost unique frames silently. A surface is about 5 MB at 1440p,
+    // which makes headroom far cheaper than the failure it prevents.
+    internal const int DefaultCapacity = 6;
 
     private sealed class Slot
     {

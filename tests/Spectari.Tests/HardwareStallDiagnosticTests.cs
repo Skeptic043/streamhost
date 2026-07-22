@@ -6,38 +6,18 @@ namespace Spectari.Tests;
 public sealed class HardwareStallDiagnosticTests
 {
     [Fact]
-    public void DeliveryFormatIncludesPendingSubmittedAndCreditMeasurements()
+    public void DeliveryFormatIncludesUniqueRateInFlightAndCredits()
     {
-        var encoder = new HardwareEncoderProgress(2, 4, 1, 0, 0);
+        var encoder = new HardwarePullEncoderProgress(2, 1, 0, 0);
 
         string diagnostic = HardwareStallDiagnostic.FormatDelivery(
             59.94,
             600,
-            2,
-            encoder,
-            inputCreditsGranted: 598);
+            encoder);
 
         Assert.Equal(
-            "[gpu-encode] encode delivery: 59.9 fps, 600 access units, debt 2 frames, pending-depth=2, submitted-depth=4, input-credits=1, input-credits-granted=598.",
+            "[gpu-encode] encode delivery: 59.9 unique fps, 600 access units, in-flight=2, input-credits=1.",
             diagnostic);
-    }
-
-    [Theory]
-    [InlineData(100, 1, 699, 0, 598)]
-    [InlineData(100, 0, 100, 2, 2)]
-    [InlineData(100, 1, 101, 0, 0)]
-    public void GrantedInputCreditCountUsesSubmissionsAndOutstandingCreditDelta(
-        long previousSubmittedFrames,
-        int previousInputCredits,
-        long submittedFrames,
-        int inputCredits,
-        long expected)
-    {
-        Assert.Equal(expected, HardwareStallDiagnostic.CountInputCreditsGranted(
-            previousSubmittedFrames,
-            previousInputCredits,
-            submittedFrames,
-            inputCredits));
     }
 
     [Fact]
@@ -49,9 +29,8 @@ public sealed class HardwareStallDiagnosticTests
             Outstanding: 8,
             TotalRents: 1200,
             Returns: new Dictionary<FrameLeaseReturnReason, long>());
-        var encoder = new HardwareEncoderProgress(
-            PendingQueueDepth: 1,
-            SubmittedQueueDepth: 7,
+        var encoder = new HardwarePullEncoderProgress(
+            InFlightDepth: 7,
             InputCredits: 0,
             LastNeedInputEventTicks: 250,
             LastHaveOutputEventTicks: 500);
@@ -74,9 +53,9 @@ public sealed class HardwareStallDiagnosticTests
             timestampFrequency: 1000);
 
         Assert.Equal(string.Join(Environment.NewLine,
-            "[gpu-encode] sustained-debt resources:",
+            "[gpu-encode] encoder-stall resources:",
             "  nv12-pool outstanding=8/8",
-            "  mf-encoder pending-depth=1 submitted-depth=7 input-credits=0 last-need-input=750ms ago last-have-output=500ms ago",
+            "  mf-encoder in-flight=7 input-credits=0 last-need-input=750ms ago last-have-output=500ms ago",
             "  video-input queue-depth=8 write-in-progress=true last-write=600ms ago"), diagnostic);
     }
 
@@ -89,7 +68,7 @@ public sealed class HardwareStallDiagnosticTests
             0,
             0,
             new Dictionary<FrameLeaseReturnReason, long>());
-        var encoder = new HardwareEncoderProgress(0, 0, 2, 0, 0);
+        var encoder = new HardwarePullEncoderProgress(0, 2, 0, 0);
         var writer = new VideoInputWriterProgress(
             1,
             1,

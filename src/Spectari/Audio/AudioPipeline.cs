@@ -125,9 +125,7 @@ internal sealed class AudioPipeline : IDisposable
             var silence = new byte[ProcessAudioCapture.SampleRate * ProcessAudioCapture.Channels * 4 / 100];
             long fallbackStartTicks = Stopwatch.GetTimestamp();
             long leadInFrames = ProcessAudioCapture.GetLeadInFrames(videoEpochTicks, fallbackStartTicks);
-            long leadInMs = (leadInFrames * 1000 + ProcessAudioCapture.SampleRate / 2)
-                / ProcessAudioCapture.SampleRate;
-            Console.WriteLine($"[audio] aligned to video timeline (+{leadInMs} ms lead-in silence)");
+            Console.WriteLine(ProcessAudioCapture.FormatLeadInLog(leadInFrames));
 
             new Thread(() =>
             {

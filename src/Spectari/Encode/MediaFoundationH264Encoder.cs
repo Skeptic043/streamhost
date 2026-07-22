@@ -12,8 +12,7 @@ internal sealed class MediaFoundationH264Encoder : IHardwareVideoEncoder
     internal const string DefaultFriendlyName = "Media Foundation H.264";
     private const int MfEventFlagNoWait = 1;
     private static readonly Guid MftEnumAdapterLuid = new("1d39518c-e220-4da8-a07f-ba172552d6b1");
-    private readonly Queue<PendingInput> _pending = new();
-    private readonly Queue<SubmittedInput> _submitted = new();
+    private readonly Dictionary<nint, SubmittedInput> _inFlightBySample = new();
     private readonly AnnexBAccessUnitAssembler _annexB = new();
 
     private IMFActivate? _activation;
@@ -27,10 +26,17 @@ internal sealed class MediaFoundationH264Encoder : IHardwareVideoEncoder
     private bool _initialized;
     private bool _sequenceHeaderLoaded;
     private bool _draining;
+    private bool _streamEnded;
+    private bool _drainCompleted;
+    private bool _shutdownCompleted;
     private bool _disposed;
     private long _submittedFrameCount;
     private long _lastNeedInputEventTicks;
     private long _lastHaveOutputEventTicks;
+    private long _releasedInputSamples;
+    private long _maximumInputHoldFrames;
+    private int _inputHoldLogged;
+    private int _reorderingLogged;
     private int _outputBufferBytes = 1024 * 1024;
 
     internal string FriendlyName => _friendlyName;
@@ -101,18 +107,22 @@ internal sealed class MediaFoundationH264Encoder : IHardwareVideoEncoder
             _transform.ProcessMessage(TMessageType.MessageNotifyBeginStreaming, UIntPtr.Zero);
             _transform.ProcessMessage(TMessageType.MessageNotifyStartOfStream, UIntPtr.Zero);
             _initialized = true;
+            Console.WriteLine(OrdinarySamplesExposeTracking()
+                ? "[mf-encode] input sample tracking: ordinary samples expose IMFTrackedSample."
+                : "[mf-encode] input sample tracking: ordinary samples are untracked; using an explicit sample-identity lease list.");
             PumpEvents([]);
         }
         catch
         {
             ReleaseAll(FrameLeaseReturnReason.Failure);
+            try { _activation?.ShutdownObject(); } catch { }
             ReleaseTransform();
             throw;
         }
     }
 
-    public IReadOnlyList<EncodedAccessUnit> Encode(
-        VideoFrameLease frame,
+    public bool TrySubmit(
+        IHardwareEncodeFrame frame,
         long presentationTime100ns,
         long duration100ns)
     {
@@ -122,79 +132,95 @@ internal sealed class MediaFoundationH264Encoder : IHardwareVideoEncoder
             frame.Return(FrameLeaseReturnReason.InputRejected);
             throw new InvalidOperationException("Hardware encoder is not initialized.");
         }
+        if (_inputCredits <= 0) return false;
+        if (frame is not GpuHardwareEncodeFrame gpuFrame)
+        {
+            frame.Return(FrameLeaseReturnReason.InputRejected);
+            throw new ArgumentException(
+                "Media Foundation requires a GPU texture frame.",
+                nameof(frame));
+        }
 
-        var output = new List<EncodedAccessUnit>();
-        _pending.Enqueue(new PendingInput(frame, presentationTime100ns, duration100ns));
+        VideoFrameLease lease = gpuFrame.Lease;
+        ID3D11Texture2D texture = lease.NativeTexture
+            ?? throw new InvalidOperationException("NV12 encoder lease lost its texture.");
+        using IMFMediaBuffer buffer = MediaFactory.MFCreateDXGISurfaceBuffer(
+            typeof(ID3D11Texture2D).GUID,
+            texture,
+            0,
+            false);
+        IMFSample sample = MediaFactory.MFCreateSample();
         try
         {
-            PumpEvents(output);
-            SubmitInputs();
-            PumpEvents(output);
-            return output;
+            sample.SampleTime = presentationTime100ns;
+            sample.SampleDuration = duration100ns;
+            sample.AddBuffer(buffer);
+            var submittedInput = new SubmittedInput(gpuFrame, sample);
+            _inFlightBySample.Add(sample.NativePointer, submittedInput);
+            _transform.ProcessInput(0, sample, 0);
+            _inputCredits--;
+            long submittedFrame = Interlocked.Increment(ref _submittedFrameCount);
+            submittedInput.SubmittedFrameNumber = submittedFrame;
+            return true;
         }
         catch
         {
-            ReleaseAll(FrameLeaseReturnReason.Failure);
+            _inFlightBySample.Remove(sample.NativePointer);
+            sample.Dispose();
+            frame.Return(FrameLeaseReturnReason.InputRejected);
             throw;
         }
     }
 
-    public IReadOnlyList<EncodedAccessUnit> CollectOutput()
+    public IReadOnlyList<EncodedAccessUnit> Poll(long nowTicks)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (!_initialized || _transform is null) return [];
 
         var output = new List<EncodedAccessUnit>();
-        try
-        {
-            PumpEvents(output);
-            SubmitInputs();
-            PumpEvents(output);
-            return output;
-        }
-        catch
-        {
-            ReleaseAll(FrameLeaseReturnReason.Failure);
-            throw;
-        }
+        ReleaseFinishedInputSamples();
+        PumpEvents(output);
+        ReleaseFinishedInputSamples();
+        return output;
     }
 
-    public HardwareEncoderProgress GetProgressSnapshot() => new(
-        _pending.Count,
-        _submitted.Count,
+    public HardwarePullEncoderProgress GetProgressSnapshot() => new(
+        _inFlightBySample.Count,
         Volatile.Read(ref _inputCredits),
         Interlocked.Read(ref _lastNeedInputEventTicks),
         Interlocked.Read(ref _lastHaveOutputEventTicks));
 
-    public IReadOnlyList<EncodedAccessUnit> Drain()
+    public IReadOnlyList<EncodedAccessUnit> Shutdown()
     {
-        if (!_initialized || _transform is null) return [];
-        var output = new List<EncodedAccessUnit>();
-        _draining = true;
+        if (_shutdownCompleted || !_initialized || _transform is null) return [];
         try
         {
-            _transform.ProcessMessage(TMessageType.MessageNotifyEndOfStream, UIntPtr.Zero);
-            _transform.ProcessMessage(TMessageType.MessageCommandDrain, UIntPtr.Zero);
-            long deadline = Stopwatch.GetTimestamp() + Stopwatch.Frequency * 2;
-            while (_draining && Stopwatch.GetTimestamp() < deadline)
-            {
-                int before = output.Count;
-                PumpEvents(output);
-                if (_draining && before == output.Count) Thread.Sleep(1);
-            }
-            if (_draining)
-                Console.Error.WriteLine("[mf-encode] drain timed out after 2 seconds; flushing outstanding surfaces.");
-            ReleaseAll(FrameLeaseReturnReason.Flush);
-            return output;
+            return HardwareEncoderShutdownSequence.Execute(
+                SignalEndOfStream,
+                () =>
+                {
+                    var output = new List<EncodedAccessUnit>();
+                    DrainTransform(output);
+                    return output;
+                },
+                () => _transform.ProcessMessage(
+                    TMessageType.MessageNotifyEndStreaming,
+                    UIntPtr.Zero),
+                () => _activation?.ShutdownObject(),
+                () =>
+                {
+                    ReleaseAll(FrameLeaseReturnReason.Teardown);
+                    ReleaseTransform();
+                    _shutdownCompleted = true;
+                });
         }
         catch
         {
+            try { _activation?.ShutdownObject(); } catch { }
             ReleaseAll(FrameLeaseReturnReason.Failure);
+            ReleaseTransform();
+            _shutdownCompleted = true;
             throw;
-        }
-        finally
-        {
-            _draining = false;
         }
     }
 
@@ -202,41 +228,16 @@ internal sealed class MediaFoundationH264Encoder : IHardwareVideoEncoder
     {
         if (_transform is not null)
             _transform.ProcessMessage(TMessageType.MessageCommandFlush, UIntPtr.Zero);
-        _inputCredits = 0;
         _draining = false;
+        _drainCompleted = false;
         ReleaseAll(FrameLeaseReturnReason.Flush);
-    }
-
-    private void SubmitInputs()
-    {
-        while (_inputCredits > 0 && _pending.TryDequeue(out PendingInput pending))
-        {
-            VideoFrameLease frame = pending.Frame;
-            ID3D11Texture2D texture = frame.NativeTexture
-                ?? throw new InvalidOperationException("NV12 encoder lease lost its texture.");
-            using IMFMediaBuffer buffer = MediaFactory.MFCreateDXGISurfaceBuffer(
-                typeof(ID3D11Texture2D).GUID,
-                texture,
-                0,
-                false);
-            using IMFSample sample = MediaFactory.MFCreateSample();
-            sample.SampleTime = pending.PresentationTime100ns;
-            sample.SampleDuration = pending.Duration100ns;
-            sample.AddBuffer(buffer);
-
-            try
-            {
-                _transform!.ProcessInput(0, sample, 0);
-                _inputCredits--;
-                _submitted.Enqueue(new SubmittedInput(frame, pending.PresentationTime100ns));
-                Interlocked.Increment(ref _submittedFrameCount);
-            }
-            catch
-            {
-                frame.Return(FrameLeaseReturnReason.InputRejected);
-                throw;
-            }
-        }
+        DiscardQueuedEvents();
+        _inputCredits = 0;
+        _streamEnded = false;
+        if (_initialized && _transform is not null)
+            _transform.ProcessMessage(
+                TMessageType.MessageNotifyStartOfStream,
+                UIntPtr.Zero);
     }
 
     private void PumpEvents(List<EncodedAccessUnit> output)
@@ -251,7 +252,7 @@ internal sealed class MediaFoundationH264Encoder : IHardwareVideoEncoder
                 {
                     case MediaEventTypes.TransformNeedInput:
                         Interlocked.Exchange(ref _lastNeedInputEventTicks, Stopwatch.GetTimestamp());
-                        _inputCredits++;
+                        if (!_streamEnded) _inputCredits++;
                         break;
                     case MediaEventTypes.TransformHaveOutput:
                         Interlocked.Exchange(ref _lastHaveOutputEventTicks, Stopwatch.GetTimestamp());
@@ -278,6 +279,49 @@ internal sealed class MediaFoundationH264Encoder : IHardwareVideoEncoder
             mediaEvent = null;
             return false;
         }
+    }
+
+    private void DiscardQueuedEvents()
+    {
+        while (TryGetEvent(out IMFMediaEvent? mediaEvent))
+            mediaEvent?.Dispose();
+    }
+
+    private void SignalEndOfStream()
+    {
+        if (_streamEnded || _transform is null) return;
+        _transform.ProcessMessage(
+            TMessageType.MessageNotifyEndOfStream,
+            UIntPtr.Zero);
+        _inputCredits = 0;
+        _streamEnded = true;
+    }
+
+    private void DrainTransform(List<EncodedAccessUnit> output)
+    {
+        if (_drainCompleted || _transform is null) return;
+        _draining = true;
+        _transform.ProcessMessage(TMessageType.MessageCommandDrain, UIntPtr.Zero);
+        long deadline = Stopwatch.GetTimestamp() + Stopwatch.Frequency * 2;
+        while (_draining && Stopwatch.GetTimestamp() < deadline)
+        {
+            int before = output.Count;
+            PumpEvents(output);
+            ReleaseFinishedInputSamples();
+            if (_draining && before == output.Count) Thread.Sleep(1);
+        }
+
+        if (_draining)
+        {
+            Console.Error.WriteLine(
+                "[mf-encode] drain timed out after 2 seconds; flushing outstanding surfaces.");
+            _transform.ProcessMessage(
+                TMessageType.MessageCommandFlush,
+                UIntPtr.Zero);
+        }
+        ReleaseFinishedInputSamples();
+        _draining = false;
+        _drainCompleted = true;
     }
 
     private void ReadOutput(List<EncodedAccessUnit> output)
@@ -310,11 +354,22 @@ internal sealed class MediaFoundationH264Encoder : IHardwareVideoEncoder
             try
             {
                 if (!_sequenceHeaderLoaded) LoadSequenceHeader();
+                long sampleTime = sample.SampleTime;
+                long? decodeTimestamp = TryGetDecodeTimestamp(sample);
+                if (SignalsReordering(sampleTime, decodeTimestamp))
+                {
+                    if (Interlocked.Exchange(ref _reorderingLogged, 1) == 0)
+                    {
+                        Console.Error.WriteLine(
+                            $"[mf-encode] REORDERING DETECTED: output DecodeTimestamp {decodeTimestamp} differs from SampleTime {sampleTime}; the H.264 pipe contract does not support B-frames.");
+                    }
+                    throw new InvalidOperationException(
+                        "Media Foundation output uses B-frame reordering; GPU encoding stopped before writing an invalid H.264 timeline.");
+                }
                 bool keyFrame = IsKeyFrame(sample);
                 byte[] bytes = CopySampleBytes(sample);
                 if (bytes.Length > 0)
                     output.Add(_annexB.Assemble(bytes, keyFrame));
-                ReturnSubmittedLease(sample.SampleTime);
             }
             finally
             {
@@ -328,16 +383,56 @@ internal sealed class MediaFoundationH264Encoder : IHardwareVideoEncoder
         }
     }
 
-    private void ReturnSubmittedLease(long sampleTime)
+    private static long? TryGetDecodeTimestamp(IMFSample sample)
     {
-        if (_submitted.Count == 0) return;
-        SubmittedInput selected = _submitted.Dequeue();
-        if (selected.PresentationTime100ns != sampleTime)
+        try { return unchecked((long)sample.GetUInt64(SampleAttributeKeys.DecodeTimestamp)); }
+        catch (SharpGenException) { return null; }
+    }
+
+    internal static bool SignalsReordering(
+        long sampleTime,
+        long? decodeTimestamp) =>
+        decodeTimestamp.HasValue && decodeTimestamp.Value != sampleTime;
+
+    private static bool OrdinarySamplesExposeTracking()
+    {
+        using IMFSample sample = MediaFactory.MFCreateSample();
+        using IMFTrackedSample? tracked = sample.QueryInterfaceOrNull<IMFTrackedSample>();
+        return tracked is not null;
+    }
+
+    private void ReleaseFinishedInputSamples()
+    {
+        if (_inFlightBySample.Count == 0) return;
+        foreach ((nint identity, SubmittedInput input) in _inFlightBySample.ToArray())
         {
-            Console.Error.WriteLine(
-                $"[mf-encode] output timestamp {sampleTime} did not match oldest input {selected.PresentationTime100ns}; releasing in submission order.");
+            if (TransformStillHolds(input.Sample)) continue;
+            _inFlightBySample.Remove(identity);
+            input.Sample.Dispose();
+            input.Frame.Return(FrameLeaseReturnReason.InputReleased);
+
+            long holdFrames = Math.Max(
+                0,
+                SubmittedFrameCount - input.SubmittedFrameNumber);
+            _maximumInputHoldFrames = Math.Max(
+                _maximumInputHoldFrames,
+                holdFrames);
+            long released = ++_releasedInputSamples;
+            if (released >= 120 &&
+                Interlocked.Exchange(ref _inputHoldLogged, 1) == 0)
+            {
+                Console.WriteLine(
+                    $"[mf-encode] input sample hold: maximum {_maximumInputHoldFrames} later submissions across the first {released} releases; NV12 pool capacity {Nv12TexturePool.DefaultCapacity}.");
+            }
         }
-        selected.Frame.Return(FrameLeaseReturnReason.OutputProduced);
+    }
+
+    private static bool TransformStillHolds(IMFSample sample)
+    {
+        nint identity = sample.NativePointer;
+        int referencesWithProbe = Marshal.AddRef(identity);
+        Marshal.Release(identity);
+        return referencesWithProbe > 2;
     }
 
     private void LoadSequenceHeader()
@@ -632,8 +727,12 @@ internal sealed class MediaFoundationH264Encoder : IHardwareVideoEncoder
 
     private void ReleaseAll(FrameLeaseReturnReason reason)
     {
-        while (_pending.TryDequeue(out PendingInput pending)) pending.Frame.Return(reason);
-        while (_submitted.TryDequeue(out SubmittedInput submitted)) submitted.Frame.Return(reason);
+        foreach (SubmittedInput input in _inFlightBySample.Values)
+        {
+            input.Sample.Dispose();
+            input.Frame.Return(reason);
+        }
+        _inFlightBySample.Clear();
     }
 
     private void ReleaseTransform()
@@ -655,16 +754,17 @@ internal sealed class MediaFoundationH264Encoder : IHardwareVideoEncoder
         _disposed = true;
         try
         {
-            if (_transform is not null)
+            if (!_shutdownCompleted)
             {
-                try { _transform.ProcessMessage(TMessageType.MessageNotifyEndOfStream, UIntPtr.Zero); }
-                catch { }
-                try { _transform.ProcessMessage(TMessageType.MessageNotifyEndStreaming, UIntPtr.Zero); }
-                catch { }
+                try { _ = Shutdown(); }
+                catch
+                {
+                    try { _activation?.ShutdownObject(); } catch { }
+                    ReleaseAll(FrameLeaseReturnReason.Teardown);
+                    ReleaseTransform();
+                    _shutdownCompleted = true;
+                }
             }
-            ReleaseAll(FrameLeaseReturnReason.Teardown);
-            ReleaseTransform();
-            try { _activation?.ShutdownObject(); } catch { }
             _activation?.Dispose();
             _activation = null;
         }
@@ -684,14 +784,14 @@ internal sealed class MediaFoundationH264Encoder : IHardwareVideoEncoder
     internal static string NormalizeFriendlyName(string? value) =>
         string.IsNullOrWhiteSpace(value) ? DefaultFriendlyName : value.Trim();
 
-    private readonly record struct PendingInput(
-        VideoFrameLease Frame,
-        long PresentationTime100ns,
-        long Duration100ns);
-
-    private readonly record struct SubmittedInput(
-        VideoFrameLease Frame,
-        long PresentationTime100ns);
+    private sealed class SubmittedInput(
+        GpuHardwareEncodeFrame frame,
+        IMFSample sample)
+    {
+        internal GpuHardwareEncodeFrame Frame { get; } = frame;
+        internal IMFSample Sample { get; } = sample;
+        internal long SubmittedFrameNumber { get; set; }
+    }
 
     [ComImport]
     [Guid("901db4c7-31ce-41a2-85dc-8fa0bf41b8da")]

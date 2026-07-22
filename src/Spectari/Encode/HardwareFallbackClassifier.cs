@@ -6,7 +6,7 @@ internal enum HardwareFallbackKind
     Probe,
     Initialization,
     AdapterMismatch,
-    SustainedFrameDebt,
+    EncoderCreditFamine,
     RuntimeFailure,
 }
 
@@ -34,7 +34,7 @@ internal static class HardwareFallbackClassifier
         HardwareFallbackKind kind,
         string reason) => kind switch
         {
-            HardwareFallbackKind.SustainedFrameDebt or
+            HardwareFallbackKind.EncoderCreditFamine or
             HardwareFallbackKind.RuntimeFailure => new(kind, true,
                 $"video pipeline stalled in the hardware texture lane: {reason}"),
             _ => throw new ArgumentOutOfRangeException(nameof(kind)),

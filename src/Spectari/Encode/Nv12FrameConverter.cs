@@ -107,8 +107,8 @@ internal static class GpuLaneDeviceFactory
 }
 
 /// <summary>
-/// GPU scale and BGRA-to-NV12 conversion on the pacing thread. Pool rent is the
-/// only admission point and fails immediately when every encoder lease is out.
+/// GPU scale and BGRA-to-NV12 conversion on the encoder worker. Pool rent fails
+/// immediately when every encoder lease is out.
 /// </summary>
 internal sealed class Nv12FrameConverter : IDisposable
 {
@@ -235,6 +235,7 @@ internal sealed class Nv12FrameConverter : IDisposable
     internal bool TryConvert(
         IGpuTextureCaptureSource captureSource,
         out VideoFrameLease? lease,
+        out long captureVersion,
         out Nv12ConvertFailure failure)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -242,11 +243,13 @@ internal sealed class Nv12FrameConverter : IDisposable
         if (status == GpuTextureCaptureStatus.CpuFrameOnly &&
             captureSource is IGpuWaitingFrameSource waitingSource)
         {
+            captureVersion = 0;
             return TryCopyWaitingFrame(waitingSource, out lease, out failure);
         }
         if (status != GpuTextureCaptureStatus.Available || frame is null)
         {
             lease = null;
+            captureVersion = 0;
             failure = status == GpuTextureCaptureStatus.CpuFrameOnly
                 ? Nv12ConvertFailure.CpuFrameOnly
                 : Nv12ConvertFailure.TextureUnavailable;
@@ -255,11 +258,13 @@ internal sealed class Nv12FrameConverter : IDisposable
         if (!_sameAdapterDevice || frame.Device.NativePointer != _capture.Device.NativePointer)
         {
             lease = null;
+            captureVersion = 0;
             failure = Nv12ConvertFailure.CrossAdapterUnsupported;
             return false;
         }
         if (!_pool.TryRent(out lease))
         {
+            captureVersion = 0;
             failure = Nv12ConvertFailure.PoolExhausted;
             return false;
         }
@@ -267,10 +272,14 @@ internal sealed class Nv12FrameConverter : IDisposable
 
         try
         {
-            if (!frame.CopyLatest(_bgraInput))
+            if (!captureSource.TryCopyLatestGpuTexture(
+                    frame,
+                    _bgraInput,
+                    out captureVersion))
             {
                 rented.Return(FrameLeaseReturnReason.InputRejected);
                 lease = null;
+                captureVersion = 0;
                 failure = Nv12ConvertFailure.CaptureCopyFailed;
                 return false;
             }
@@ -308,6 +317,7 @@ internal sealed class Nv12FrameConverter : IDisposable
         {
             rented.Return(FrameLeaseReturnReason.Failure);
             lease = null;
+            captureVersion = 0;
             failure = Nv12ConvertFailure.ConversionFailed;
             ReportFailureOnce("frame conversion", ex);
             return false;
@@ -368,33 +378,6 @@ internal sealed class Nv12FrameConverter : IDisposable
             lease = null;
             failure = Nv12ConvertFailure.ConversionFailed;
             ReportFailureOnce("waiting-frame upload", ex);
-            return false;
-        }
-    }
-
-    internal bool TryDuplicate(
-        VideoFrameLease source,
-        out VideoFrameLease? duplicate)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        if (!_pool.TryRent(out duplicate))
-            return false;
-
-        VideoFrameLease rented = duplicate!;
-        try
-        {
-            ID3D11Texture2D sourceTexture = source.NativeTexture
-                ?? throw new InvalidOperationException("Source NV12 lease lost its texture.");
-            ID3D11Texture2D destinationTexture = rented.NativeTexture
-                ?? throw new InvalidOperationException("Duplicate NV12 lease lost its texture.");
-            _laneDevice.Context.CopyResource(destinationTexture, sourceTexture);
-            return true;
-        }
-        catch (Exception ex)
-        {
-            rented.Return(FrameLeaseReturnReason.Failure);
-            duplicate = null;
-            ReportFailureOnce("debt-frame duplication", ex);
             return false;
         }
     }
