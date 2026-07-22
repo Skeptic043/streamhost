@@ -46,7 +46,21 @@ internal static class DiagnosticLogEventText
     {
         string framesPerSecond = sample.FramesPerSecond.ToString("0.0", CultureInfo.InvariantCulture);
         string elapsedSeconds = sample.ElapsedSeconds.ToString("0.0", CultureInfo.InvariantCulture);
+        string averageCallbackMilliseconds = sample.AverageCallbackMilliseconds.ToString(
+            "0.00",
+            CultureInfo.InvariantCulture);
+        string maximumCallbackMilliseconds = sample.MaximumCallbackMilliseconds.ToString(
+            "0.00",
+            CultureInfo.InvariantCulture);
+        string averageGateWaitMilliseconds = sample.AverageGateWaitMilliseconds.ToString(
+            "0.00",
+            CultureInfo.InvariantCulture);
+        string maximumGateWaitMilliseconds = sample.MaximumGateWaitMilliseconds.ToString(
+            "0.00",
+            CultureInfo.InvariantCulture);
         return $"[window-capture] frame delivery: {framesPerSecond} fps " +
-               $"({sample.FrameCount} frames in {elapsedSeconds}s)";
+               $"(WGC delivered {sample.FrameCount} frames / {sample.TargetTickCount} target ticks in {elapsedSeconds}s); " +
+               $"callback avg/max {averageCallbackMilliseconds}/{maximumCallbackMilliseconds} ms; " +
+               $"gate/context wait avg/max {averageGateWaitMilliseconds}/{maximumGateWaitMilliseconds} ms";
     }
 }

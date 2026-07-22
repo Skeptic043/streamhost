@@ -73,10 +73,19 @@ public sealed class DiagnosticLogEventTextTests
     [Fact]
     public void WindowFrameDeliveryRateIncludesMeasuredWindow()
     {
-        var sample = new WindowFrameDeliveryRateSample(599, 10.01);
+        var sample = new WindowFrameDeliveryRateSample(
+            599,
+            600,
+            10.01,
+            1.234,
+            4.567,
+            0.123,
+            1.789);
 
         Assert.Equal(
-            "[window-capture] frame delivery: 59.8 fps (599 frames in 10.0s)",
+            "[window-capture] frame delivery: 59.8 fps " +
+            "(WGC delivered 599 frames / 600 target ticks in 10.0s); " +
+            "callback avg/max 1.23/4.57 ms; gate/context wait avg/max 0.12/1.79 ms",
             DiagnosticLogEventText.WindowFrameDeliveryRate(sample));
     }
 }

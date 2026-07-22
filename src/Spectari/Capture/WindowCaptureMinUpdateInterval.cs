@@ -21,7 +21,7 @@ internal readonly record struct WindowCaptureMinUpdateIntervalResult(
 internal static class WindowCaptureMinUpdateInterval
 {
     private const int NoInterface = unchecked((int)0x80004002);
-    private const int TargetFramesPerSecond = 60;
+    internal const int TargetFramesPerSecond = 60;
     private const int PutMinUpdateIntervalSlot = 7;
     private static readonly Guid InterfaceId = new("67C0EA62-1F85-5061-925A-239BE0AC09CB");
 

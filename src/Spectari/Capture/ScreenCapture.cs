@@ -228,7 +228,8 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics, IGpuTex
         {
             _windowDeliveryRate = new WindowFrameDeliveryRateTracker(
                 Stopwatch.Frequency,
-                TimeSpan.FromSeconds(10));
+                TimeSpan.FromSeconds(10),
+                WindowCaptureMinUpdateInterval.TargetFramesPerSecond);
         }
         trace?.Begin("D3D11CreateDevice");
         if (sharedDevice is null)
@@ -381,13 +382,17 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics, IGpuTex
         // or vanish silently). Record the first failure so the session can stop
         // with a real diagnostic instead of streaming nothing while looking live.
         Direct3D11CaptureFrame? frame = null;
+        long callbackStartedTicks = Stopwatch.GetTimestamp();
+        long gateWaitTicks = 0;
         Interlocked.Increment(ref _callbacksStarted);
-        Interlocked.Exchange(ref _lastCallbackTicks, Stopwatch.GetTimestamp());
+        Interlocked.Exchange(ref _lastCallbackTicks, callbackStartedTicks);
         Volatile.Write(ref _callbackStage, (int)CallbackStage.WaitingForGpuGate);
         try
         {
+            long gateWaitStartedTicks = Stopwatch.GetTimestamp();
             lock (_gate)
             {
+                gateWaitTicks = Math.Max(0, Stopwatch.GetTimestamp() - gateWaitStartedTicks);
                 if (_disposing) return;
 
                 Volatile.Write(ref _callbackStage, (int)CallbackStage.GettingFrame);
@@ -454,7 +459,10 @@ public sealed class ScreenCapture : ICaptureSource, ICaptureDiagnostics, IGpuTex
             Interlocked.Increment(ref _framesArrived);
             long frameReadyTicks = Stopwatch.GetTimestamp();
             Interlocked.Exchange(ref _lastFrameReadyTicks, frameReadyTicks);
-            if (_windowDeliveryRate?.RecordFrame(frameReadyTicks) is { } deliveryRate)
+            if (_windowDeliveryRate?.RecordFrame(
+                    frameReadyTicks,
+                    Math.Max(0, frameReadyTicks - callbackStartedTicks),
+                    gateWaitTicks) is { } deliveryRate)
             {
                 TryWriteWindowDiagnostic(
                     DiagnosticLogEventText.WindowFrameDeliveryRate(deliveryRate));

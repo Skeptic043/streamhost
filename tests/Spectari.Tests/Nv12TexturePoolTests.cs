@@ -17,10 +17,17 @@ public sealed class Nv12TexturePoolTests
             leases.Add(lease!);
         }
 
-        Assert.Equal(8, pool.GetAccounting().Capacity);
+        Assert.Equal(12, pool.GetAccounting().Capacity);
         Assert.False(pool.TryRent(out _));
         foreach (VideoFrameLease lease in leases)
             lease.Return(FrameLeaseReturnReason.Flush);
+    }
+
+    [Fact]
+    public void CapacityAboveDefaultIsRejected()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            Nv12TexturePool.CreateForTesting(Nv12TexturePool.DefaultCapacity + 1));
     }
 
     [Fact]

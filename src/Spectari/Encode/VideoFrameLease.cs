@@ -66,7 +66,7 @@ internal sealed class VideoFrameLease
 /// <summary>Fixed encode-surface pool with immediate failure on exhaustion.</summary>
 internal sealed class Nv12TexturePool : IDisposable
 {
-    internal const int DefaultCapacity = 8;
+    internal const int DefaultCapacity = 12;
 
     private sealed class Slot
     {
