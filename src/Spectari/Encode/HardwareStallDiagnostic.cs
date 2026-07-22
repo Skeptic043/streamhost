@@ -6,9 +6,10 @@ internal static class HardwareStallDiagnostic
 {
     internal static string FormatDelivery(
         double framesPerSecond,
+        double duplicatePercent,
         long accessUnits,
         HardwarePullEncoderProgress encoder) =>
-        $"[gpu-encode] encode delivery: {framesPerSecond:F1} unique fps, {accessUnits} access units, in-flight={encoder.InFlightDepth}, input-credits={encoder.InputCredits}.";
+        $"[gpu-encode] encode delivery: {framesPerSecond:F1} stream fps ({duplicatePercent:F0}% duplicate), {accessUnits} access units, in-flight={encoder.InFlightDepth}, input-credits={encoder.InputCredits}.";
 
     internal static string Format(
         FrameLeaseAccounting pool,

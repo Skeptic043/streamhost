@@ -94,23 +94,25 @@ internal sealed class VideoPipelineWatchdog
         bool sustainedInput = completedInputs >= 5 || completedHardwareInputs >= 5;
         bool inputWriteBlocked = currentWriter.WriteInProgress &&
             now - currentWriter.LastWriteStartedTicks >= Stopwatch.Frequency;
-        bool reachedFfmpeg = sustainedInput || inputWriteBlocked;
-        string stopReason = sustainedInput
-            ? "video pipeline stalled after sustained video-input delivery; see log"
-            : inputWriteBlocked
-                ? "video pipeline stalled at ffmpeg stdin; see log"
-                : "video pipeline stalled before sustained ffmpeg stdin writes; see log";
+        VideoPipelineStallDecision decision = VideoPipelineStallPolicy.Classify(
+            sustainedInput,
+            inputWriteBlocked);
 
         LogProgress(baseline);
-        Console.Error.WriteLine(reachedFfmpeg
+        Console.Error.WriteLine(decision.ConfirmedEncoderOrOutputFailure
             ? "[pipeline] sustained MF or ffmpeg input activity, or a blocked stdin write, places the stall in the encoder/output path; the cached hardware verdict is no longer trusted."
             : "[pipeline] video input did not advance continuously during the watchdog window; this is an upstream capture, conversion, or pacing stall, not a confirmed encoder failure.");
 
-        if (_ffmpeg.CopiesH264Video || _ffmpeg.EncoderName != "libx264")
+        if (!decision.PermitCpuRecovery)
+        {
+            Console.Error.WriteLine(
+                "[pipeline] CPU recovery skipped because the stall is upstream of the encoder/output path.");
+        }
+        else if (_ffmpeg.CopiesH264Video || _ffmpeg.EncoderName != "libx264")
         {
             Console.Error.WriteLine(
                 "[pipeline] Starting a one-time CPU recovery session (libx264); capture and encoder state will be recreated.");
-            if (reachedFfmpeg && !_ffmpeg.CopiesH264Video)
+            if (!_ffmpeg.CopiesH264Video)
                 FfmpegEncoder.InvalidateProbeCache();
         }
         else
@@ -119,7 +121,7 @@ internal sealed class VideoPipelineWatchdog
                 "[pipeline] CPU recovery is already active; stopping with the stage reason above.");
         }
 
-        _stallExit.Begin(stopReason, FormatActiveStages);
+        _stallExit.Begin(decision.StopReason, FormatActiveStages);
     }
 
     private PipelineBaseline TakeBaseline() => new(

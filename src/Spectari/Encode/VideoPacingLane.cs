@@ -315,6 +315,7 @@ internal sealed class HardwareVideoPacingLane : IVideoPacingLane
         long lastReport = Stopwatch.GetTimestamp();
         long reportInterval = Stopwatch.Frequency * 2;
         long lastSubmittedFrames = pullLoop.SubmittedFrames;
+        long lastDuplicateFrames = pullLoop.DuplicateFrames;
         long lastAccessUnits = pullLoop.AccessUnitsWritten;
 
         while (!cancellationToken.IsCancellationRequested)
@@ -349,15 +350,21 @@ internal sealed class HardwareVideoPacingLane : IVideoPacingLane
             {
                 double seconds = (now - lastReport) / (double)Stopwatch.Frequency;
                 long submitted = pullLoop.SubmittedFrames - lastSubmittedFrames;
+                long duplicates = pullLoop.DuplicateFrames - lastDuplicateFrames;
                 long accessUnits = pullLoop.AccessUnitsWritten - lastAccessUnits;
+                double duplicatePercent = submitted > 0
+                    ? duplicates * 100.0 / submitted
+                    : 0;
                 _broadcaster.SourceFps = (int)Math.Round(
                     submitted / seconds);
-                _broadcaster.DupPercent = 0;
+                _broadcaster.DupPercent = (int)Math.Round(duplicatePercent);
                 Console.WriteLine(HardwareStallDiagnostic.FormatDelivery(
                     submitted / seconds,
+                    duplicatePercent,
                     accessUnits,
                     _encoder.GetProgressSnapshot()));
                 lastSubmittedFrames = pullLoop.SubmittedFrames;
+                lastDuplicateFrames = pullLoop.DuplicateFrames;
                 lastAccessUnits = pullLoop.AccessUnitsWritten;
                 lastReport = now;
                 reportInterval = Stopwatch.Frequency * 10;

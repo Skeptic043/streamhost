@@ -6,17 +6,18 @@ namespace Spectari.Tests;
 public sealed class HardwareStallDiagnosticTests
 {
     [Fact]
-    public void DeliveryFormatIncludesUniqueRateInFlightAndCredits()
+    public void DeliveryFormatIncludesStreamRateDuplicatesInFlightAndCredits()
     {
         var encoder = new HardwarePullEncoderProgress(2, 1, 0, 0);
 
         string diagnostic = HardwareStallDiagnostic.FormatDelivery(
             59.94,
+            12.5,
             600,
             encoder);
 
         Assert.Equal(
-            "[gpu-encode] encode delivery: 59.9 unique fps, 600 access units, in-flight=2, input-credits=1.",
+            "[gpu-encode] encode delivery: 59.9 stream fps (12% duplicate), 600 access units, in-flight=2, input-credits=1.",
             diagnostic);
     }
 

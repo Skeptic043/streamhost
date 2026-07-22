@@ -156,6 +156,7 @@ public sealed class HardwareEncoderPullLoopTests
         Assert.Equal(
             harness.Encoder.SubmittedVersions.Count,
             harness.Encoder.SubmittedVersions.Distinct().Count());
+        Assert.Equal(0, harness.Loop.DuplicateFrames);
     }
 
     [Fact]
@@ -223,6 +224,90 @@ public sealed class HardwareEncoderPullLoopTests
             harness.Encoder.SubmittedVersions.Distinct().Count());
     }
 
+    [Fact]
+    public void StaticCaptureSubmitsPeriodicKeepalivesWithRealTimestamps()
+    {
+        var harness = new PullLoopHarness(
+            poolCapacity: 16,
+            creditEverySteps: 1,
+            holdFrames: 0,
+            outputLagFrames: 0);
+        long keepaliveTicks = Stopwatch.Frequency *
+            HardwareEncoderPullLoop.KeepaliveIntervalMilliseconds / 1000;
+
+        harness.StepAt(0);
+        for (int keepalive = 1; keepalive <= 8; keepalive++)
+        {
+            harness.StepWithoutCaptureAt(keepalive * keepaliveTicks - 1);
+            Assert.Equal(keepalive, harness.Encoder.SubmittedVersions.Count);
+
+            harness.StepWithoutCaptureAt(keepalive * keepaliveTicks);
+            Assert.Equal(keepalive + 1, harness.Encoder.SubmittedVersions.Count);
+        }
+
+        Assert.Equal(8, harness.Loop.DuplicateFrames);
+        Assert.Single(harness.Encoder.SubmittedVersions.Distinct());
+        Assert.Equal(
+            Enumerable.Range(0, 9)
+                .Select(index => checked(
+                    index * keepaliveTicks * TimeSpan.TicksPerSecond /
+                    Stopwatch.Frequency)),
+            harness.Encoder.SubmittedPresentationTimes100ns);
+        Assert.True(harness.Encoder.SubmittedPresentationTimes100ns
+            .Zip(harness.Encoder.SubmittedPresentationTimes100ns.Skip(1))
+            .All(pair => pair.First < pair.Second));
+    }
+
+    [Fact]
+    public void KeepaliveCannotExceedTheSessionRateCap()
+    {
+        const int sessionFramesPerSecond = 2;
+        var harness = new PullLoopHarness(
+            poolCapacity: 16,
+            creditEverySteps: 1,
+            holdFrames: 0,
+            outputLagFrames: 0,
+            framesPerSecond: sessionFramesPerSecond);
+        long stepTicks = Stopwatch.Frequency / 100;
+
+        harness.StepAt(0);
+        for (int step = 1; step <= 500; step++)
+            harness.StepWithoutCaptureAt(step * stepTicks);
+
+        Assert.Equal(11, harness.Encoder.SubmittedVersions.Count);
+        long minimumInterval100ns = TimeSpan.TicksPerSecond /
+            sessionFramesPerSecond;
+        Assert.All(
+            harness.Encoder.SubmittedPresentationTimes100ns
+                .Zip(harness.Encoder.SubmittedPresentationTimes100ns.Skip(1)),
+            pair => Assert.True(
+                pair.Second - pair.First >= minimumInterval100ns));
+    }
+
+    [Fact]
+    public void StaticCaptureCreditFamineStillIdentifiesEncoderFailure()
+    {
+        var harness = new PullLoopHarness(
+            poolCapacity: 16,
+            creditEverySteps: 1,
+            holdFrames: 0,
+            outputLagFrames: 0);
+        long keepaliveTicks = Stopwatch.Frequency *
+            HardwareEncoderPullLoop.KeepaliveIntervalMilliseconds / 1000;
+        long famineTicks = Stopwatch.Frequency *
+            EncoderCreditFaminePolicy.DefaultFrameIntervals /
+            FieldFramesPerSecond;
+
+        harness.StepAt(0);
+        harness.Encoder.CreditFamine = true;
+        Assert.Null(harness.StepWithoutCaptureAt(keepaliveTicks).StallReason);
+
+        HardwarePullStepResult result = harness.StepWithoutCaptureAt(
+            keepaliveTicks + famineTicks);
+
+        Assert.Contains("no NeedInput", result.StallReason);
+    }
+
     private sealed class PullLoopHarness
     {
         private long _step;
@@ -234,7 +319,8 @@ public sealed class HardwareEncoderPullLoopTests
             int holdFrames,
             int outputLagFrames,
             bool reorderOutput = false,
-            bool advanceCaptureOnWait = false)
+            bool advanceCaptureOnWait = false,
+            int framesPerSecond = FieldFramesPerSecond)
         {
             Capture = new FakeCapture(advanceCaptureOnWait);
             Converter = new FakeConverter(poolCapacity);
@@ -249,7 +335,7 @@ public sealed class HardwareEncoderPullLoopTests
                 Converter,
                 Encoder,
                 Output,
-                FieldFramesPerSecond,
+                framesPerSecond,
                 Stopwatch.Frequency,
                 _ => EpochCount++);
         }
@@ -279,6 +365,9 @@ public sealed class HardwareEncoderPullLoopTests
             Capture.Publish(++_captureVersion);
             return Loop.Step(timestampTicks);
         }
+
+        internal HardwarePullStepResult StepWithoutCaptureAt(long timestampTicks) =>
+            Loop.Step(timestampTicks);
 
         internal long NextTimestamp()
         {

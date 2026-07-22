@@ -168,6 +168,8 @@ internal sealed class EncoderCreditFaminePolicy
 /// </summary>
 internal sealed class HardwareEncoderPullLoop
 {
+    internal const int KeepaliveIntervalMilliseconds = 250;
+
     private readonly IHardwareEncodeCapture _capture;
     private readonly IHardwareEncodeConverter _converter;
     private readonly IHardwarePullEncoder _encoder;
@@ -175,13 +177,16 @@ internal sealed class HardwareEncoderPullLoop
     private readonly EncoderCreditFaminePolicy _creditFamine;
     private readonly long _timestampFrequency;
     private readonly long _frameIntervalTicks;
+    private readonly long _keepaliveIntervalTicks;
     private readonly long _nominalDuration100ns;
     private readonly Action<long> _firstSubmission;
     private long _lastSubmittedVersion;
     private long _nextSubmissionDeadlineTicks;
+    private long _nextKeepaliveDeadlineTicks;
     private long _firstSubmissionTicks;
     private long _lastPresentationTime100ns;
     private long _submittedFrames;
+    private long _duplicateFrames;
     private long _accessUnitsWritten;
 
     internal HardwareEncoderPullLoop(
@@ -204,6 +209,9 @@ internal sealed class HardwareEncoderPullLoop
             timestampFrequency);
         _timestampFrequency = timestampFrequency;
         _frameIntervalTicks = Math.Max(1, timestampFrequency / framesPerSecond);
+        _keepaliveIntervalTicks = Math.Max(
+            1,
+            checked(timestampFrequency * KeepaliveIntervalMilliseconds / 1000));
         _nominalDuration100ns = Math.Max(
             1,
             TimeSpan.TicksPerSecond / framesPerSecond);
@@ -215,6 +223,7 @@ internal sealed class HardwareEncoderPullLoop
 
     internal long LastSubmittedVersion => _lastSubmittedVersion;
     internal long SubmittedFrames => _submittedFrames;
+    internal long DuplicateFrames => _duplicateFrames;
     internal long AccessUnitsWritten => _accessUnitsWritten;
 
     internal HardwarePullStepResult Step(long nowTicks)
@@ -226,10 +235,13 @@ internal sealed class HardwareEncoderPullLoop
 
         long currentVersion = _capture.FrameVersion;
         bool newerFrameReady = currentVersion > _lastSubmittedVersion;
+        bool keepaliveDue = _submittedFrames > 0 &&
+            nowTicks >= _nextKeepaliveDeadlineTicks;
+        bool frameReadyForSubmission = newerFrameReady || keepaliveDue;
         HardwarePullEncoderProgress progress = _encoder.GetProgressSnapshot();
         bool submissionDue = _submittedFrames == 0 ||
             nowTicks >= _nextSubmissionDeadlineTicks;
-        if (newerFrameReady && submissionDue && progress.InputCredits > 0)
+        if (frameReadyForSubmission && submissionDue && progress.InputCredits > 0)
         {
             if (_converter.TryConvert(
                 currentVersion,
@@ -252,17 +264,23 @@ internal sealed class HardwareEncoderPullLoop
                     _firstSubmissionTicks = nowTicks;
                     _firstSubmission(nowTicks);
                 }
+                bool duplicate = frame!.CaptureVersion <= _lastSubmittedVersion;
                 _lastPresentationTime100ns = presentationTime100ns;
                 _lastSubmittedVersion = Math.Max(
                     currentVersion,
                     frame!.CaptureVersion);
                 _submittedFrames++;
+                if (duplicate) _duplicateFrames++;
                 AdvanceSubmissionDeadline(nowTicks);
+                _nextKeepaliveDeadlineTicks = checked(
+                    nowTicks + _keepaliveIntervalTicks);
                 submitted = true;
                 didWork = true;
                 accessUnits += PollAndWrite(nowTicks);
                 currentVersion = _capture.FrameVersion;
                 newerFrameReady = currentVersion > _lastSubmittedVersion;
+                keepaliveDue = nowTicks >= _nextKeepaliveDeadlineTicks;
+                frameReadyForSubmission = newerFrameReady || keepaliveDue;
                 progress = _encoder.GetProgressSnapshot();
                 submissionDue = nowTicks >= _nextSubmissionDeadlineTicks;
             }
@@ -270,9 +288,9 @@ internal sealed class HardwareEncoderPullLoop
 
         string? stallReason = _creditFamine.Observe(
             nowTicks,
-            newerFrameReady && submissionDue,
+            frameReadyForSubmission && submissionDue,
             progress)
-                ? $"encoder received no NeedInput event for {EncoderCreditFaminePolicy.DefaultFrameIntervals} frame intervals while a newer capture frame was ready"
+                ? $"encoder received no NeedInput event for {EncoderCreditFaminePolicy.DefaultFrameIntervals} frame intervals while a capture frame was ready for submission"
                 : null;
         return new HardwarePullStepResult(didWork, submitted, accessUnits, stallReason);
     }
