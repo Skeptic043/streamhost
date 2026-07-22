@@ -81,42 +81,46 @@ public sealed class HardwareFrameTickPolicyTests
             HardwareFrameTickPolicy.MaximumPendingQueueDepth);
         HardwareFrameTickAdmission recovery = policy.AdmitEncoderTick(
             HardwareFrameTickPolicy.MaximumPendingQueueDepth - 2);
-        HardwareFrameTickPlan recovered = policy.PlanAvailableTick(duplicateAvailable: true);
+        HardwareFrameTickPlan recovered = policy.PlanAvailableTick(recovery.CanRepayDebt);
 
         Assert.False(blocked.Accepted);
         Assert.Equal(1, blocked.Debt.DebtFrames);
         Assert.True(recovery.Accepted);
+        Assert.True(recovery.CanRepayDebt);
         Assert.Equal(1, recovered.DuplicateSubmissions);
         Assert.Equal(0, recovered.Debt.DebtFrames);
     }
 
     [Fact]
-    public void DebtRepaymentReservesTwoPendingSlotsBeforeAdmission()
+    public void StandingDepthTwoAdmitsCurrentFrameAndRepayment()
     {
         var policy = new HardwareFrameTickPolicy(60);
         policy.RecordUnavailableTick();
 
-        HardwareFrameTickAdmission rejected = policy.AdmitEncoderTick(
-            HardwareFrameTickPolicy.MaximumPendingQueueDepth - 1);
-        HardwareFrameTickAdmission accepted = policy.AdmitEncoderTick(
-            HardwareFrameTickPolicy.MaximumPendingQueueDepth - 2);
+        HardwareFrameTickAdmission admission = policy.AdmitEncoderTick(2);
+        HardwareFrameTickPlan plan = policy.PlanAvailableTick(admission.CanRepayDebt);
 
-        Assert.False(rejected.Accepted);
-        Assert.Equal(2, rejected.Debt.DebtFrames);
-        Assert.True(accepted.Accepted);
-        Assert.Equal(2, accepted.Debt.DebtFrames);
+        Assert.True(admission.Accepted);
+        Assert.True(admission.CanRepayDebt);
+        Assert.Equal(1, plan.CurrentFrameSubmissions);
+        Assert.Equal(1, plan.DuplicateSubmissions);
+        Assert.Equal(0, plan.Debt.DebtFrames);
     }
 
     [Fact]
-    public void QueueAdmissionNeverExceedsTheThreeFrameBound()
+    public void LastPendingSlotAdmitsCurrentFrameWithoutRepayment()
     {
         var policy = new HardwareFrameTickPolicy(60);
+        policy.RecordUnavailableTick();
 
         HardwareFrameTickAdmission admission = policy.AdmitEncoderTick(
             HardwareFrameTickPolicy.MaximumPendingQueueDepth - 1);
+        HardwareFrameTickPlan plan = policy.PlanAvailableTick(admission.CanRepayDebt);
 
         Assert.True(admission.Accepted);
-        Assert.Equal(0, admission.Debt.DebtFrames);
-        Assert.Equal(3, HardwareFrameTickPolicy.MaximumPendingQueueDepth);
+        Assert.False(admission.CanRepayDebt);
+        Assert.Equal(0, plan.DuplicateSubmissions);
+        Assert.Equal(1, plan.Debt.DebtFrames);
+        Assert.Equal(6, HardwareFrameTickPolicy.MaximumPendingQueueDepth);
     }
 }

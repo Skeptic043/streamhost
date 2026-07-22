@@ -285,7 +285,8 @@ internal sealed class HardwareVideoPacingLane : IVideoPacingLane
             }
 
             VideoFrameLease? duplicate = null;
-            bool repay = _ticks.CurrentDebt.DebtFrames > 0 &&
+            bool repay = admission.CanRepayDebt &&
+                _ticks.CurrentDebt.DebtFrames > 0 &&
                 _converter.TryDuplicate(current!, out duplicate);
             HardwareFrameTickPlan plan = _ticks.PlanAvailableTick(repay);
             VideoFrameLease[] submissions = plan.DuplicateSubmissions == 1
@@ -393,7 +394,7 @@ internal sealed class HardwareVideoPacingLane : IVideoPacingLane
         if (debtNow - lastDebtLog >= Stopwatch.Frequency || debt.StallSignal)
         {
             Console.Error.WriteLine(
-                $"[gpu-encode] frame debt: {debt.DebtFrames} frames, sync error {debt.SyncError.TotalMilliseconds:F1} ms ({reason}).");
+                $"[gpu-encode] frame debt: {debt.DebtFrames} frames, sync error {debt.SyncError.TotalMilliseconds:F1} ms, recent net growth {debt.RecentNetGrowthFrames} frames/{FrameDebtPolicy.GrowthWindowSeconds}s ({reason}).");
             lastDebtLog = debtNow;
         }
         if (!debt.StallSignal) return null;
@@ -404,7 +405,7 @@ internal sealed class HardwareVideoPacingLane : IVideoPacingLane
             _writer.GetProgressSnapshot(),
             debtNow));
         return RuntimeFailure(
-            $"sustained frame debt reached {debt.DebtFrames} frames after {reason}",
+            $"frame debt grew by {debt.RecentNetGrowthFrames} frames in {FrameDebtPolicy.GrowthWindowSeconds} seconds, reaching {debt.DebtFrames} frames after {reason}",
             HardwareFallbackKind.SustainedFrameDebt);
     }
 
